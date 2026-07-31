@@ -3,7 +3,7 @@ import redis
 
 import config
 from mesh import DuplicateSuppressor
-from packet import Packet
+from packet import Packet, make_replay_packet
 
 
 class Routing:
@@ -55,22 +55,66 @@ class Routing:
             f"[MESH-DROP] unknown type={packet.msg_type}",
             flush=True,
         )
-
+        
     def _handle_ask(self, packet: Packet) -> None:
         """
-        ASKパケットを処理する。
-        現時点では、自分宛てなら到着、それ以外は中継する。
+        ASKを受信したときの処理。
+        指定されたデータを持っていて、
+        かつ自分が目標エリアの場合はREPLYを生成する。
+        条件を満たさない場合はASKを中継する。
         """
+        is_target_area = (
+            packet.target_bst == config.LOCAL_BST_ID
+        )
 
-        if packet.target_bst == config.LOCAL_BST_ID:
+        has_data = (
+            packet.data_id in config.MY_DATA_IDS
+        )
+
+        if is_target_area and has_data:
             print(
-                f"[ASK-ARRIVED] "
+                f"[ASK-DATA-FOUND] "
                 f"id={packet.pkt_id} "
                 f"target={packet.target_bst} "
-                f"data={packet.data_id}",
+                f"data={packet.data_id} "
+                f"source={packet.source_bst}",
                 flush=True,
             )
+
+            reply_packet = make_reply_packet(
+                pkt_id=packet.pkt_id,
+                target_bst=packet.source_bst,
+                data_id=packet.data_id,
+                responder_bst=config.LOCAL_BST_ID,
+            )
+
+            reply_line = reply_packet.encode()
+
+            self.redis.lpush(
+                config.REDIS_RAW_TX,
+                reply_line,
+            )
+
+            print(
+                f"[REPLY-SEND] "
+                f"id={reply_packet.pkt_id} "
+                f"target={reply_packet.target_bst} "
+                f"data={reply_packet.data_id} "
+                f"responder={reply_packet.responder_bst} "
+                f"ttl={reply_packet.ttl} "
+                f"line={reply_line}",
+                flush=True,
+            )
+
             return
+
+        print(
+            f"[ASK-FORWARD] "
+            f"id={packet.pkt_id} "
+            f"target_match={is_target_area} "
+            f"has_data={has_data}",
+            flush=True,
+        )
 
         self._forward(packet)
 
