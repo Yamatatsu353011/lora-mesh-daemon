@@ -12,6 +12,7 @@ NODE_ID = "yaglabterm02"
 OWN_ID = "0002"
 
 LOCAL_BST_ID = 200
+MY_DATA_IDS = {"a", "b", "c"}
 
 # ============================================================
 # Serial port
