@@ -6,7 +6,7 @@ import redis
 
 import config
 from packet import Packet
-
+from mesh import DuplicateSuppressor
 
 def main():
     r = redis.Redis(
@@ -15,6 +15,8 @@ def main():
         db=config.REDIS_DB,
         decode_responses=True,
     )
+
+    duplicate_suppressor = DuplicateSuppressor(retention_sec=300.0)
 
     pubsub = r.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe(config.REDIS_EVENT)
@@ -52,6 +54,18 @@ def main():
             # ビーコンなど、ASK/REPLY以外のデータは無視
             if packet is None:
                 print(f"[MESH] non-mesh packet: {line}", flush=True)
+                continue
+
+            if duplicate_suppressor.is_duplicate(
+                packet.msg_type,
+                packet.pkt_id,
+            ):
+                print(
+                    f"[MESH-DROP] duplicate "
+                    f"type={packet.msg_type} "
+                    f"id={packet.pkt_id}",
+                    flush=True,
+                )
                 continue
 
             print(
