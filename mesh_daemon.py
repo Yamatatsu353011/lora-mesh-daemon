@@ -90,6 +90,18 @@ def main():
                 flush=True,
             )
 
+            # 自分宛てなら中継せず、到着として処理する
+            if packet.target_bst == config.LOCAL_BST_ID:
+                print(
+                    f"[MESH-ARRIVED] "
+                    f"type={packet.msg_type} "
+                    f"id={packet.pkt_id} "
+                    f"target={packet.target_bst} "
+                    f"data={packet.data_id}",
+                    flush=True,
+                )
+                continue
+
             # TTLが0なら中継しない
             if not packet.can_forward():
                 print(
