@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass
 from typing import Optional
-
+DEFAULT_TTL = 10
 
 @dataclass
 class Packet:
@@ -11,19 +11,20 @@ class Packet:
     data_id: str
     source_bst: int = -1
     responder_bst: int = -1
+    ttl: int = DEFAULT_TTL
 
     def encode(self) -> str:
         """PacketをLoRa送信用の文字列へ変換する。"""
         if self.msg_type == "ASK":
             return (
                 f"A,{self.pkt_id},{self.target_bst},"
-                f"{self.data_id},{self.source_bst}"
+                f"{self.data_id},{self.source_bst},{self.ttl}"
             )
 
         if self.msg_type == "REPLY":
             return (
                 f"R,{self.pkt_id},{self.target_bst},"
-                f"{self.data_id},{self.responder_bst}"
+                f"{self.data_id},{self.responder_bst},{self.ttl}"
             )
 
         raise ValueError(f"Unknown message type: {self.msg_type}")
@@ -37,6 +38,8 @@ class Packet:
             if len(parts) < 5:
                 return None
 
+            ttl = int(parts[5]) if len(parts) >= 6 else DEFAULT_TTL
+
             if parts[0] == "A":
                 return cls(
                     msg_type="ASK",
@@ -44,6 +47,7 @@ class Packet:
                     target_bst=int(parts[2]),
                     data_id=parts[3],
                     source_bst=int(parts[4]),
+                    ttl = ttl,
                 )
 
             if parts[0] == "R":
@@ -53,6 +57,7 @@ class Packet:
                     target_bst=int(parts[2]),
                     data_id=parts[3],
                     responder_bst=int(parts[4]),
+                    ttl = ttl,
                 )
 
             return None
@@ -66,6 +71,7 @@ def make_ask_packet(
     target_bst: int,
     data_id: str,
     source_bst: int,
+    ttl: int = DEFAULT_TTL,
 ) -> Packet:
     return Packet(
         msg_type="ASK",
@@ -73,6 +79,7 @@ def make_ask_packet(
         target_bst=target_bst,
         data_id=data_id,
         source_bst=source_bst,
+        ttl = ttl,
     )
 
 
@@ -81,6 +88,7 @@ def make_reply_packet(
     target_bst: int,
     data_id: str,
     responder_bst: int,
+    ttl: int = DEFAULT_TTL,
 ) -> Packet:
     return Packet(
         msg_type="REPLY",
@@ -88,4 +96,5 @@ def make_reply_packet(
         target_bst=target_bst,
         data_id=data_id,
         responder_bst=responder_bst,
+        ttl = ttl,
     )
