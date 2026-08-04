@@ -3,7 +3,7 @@ import redis
 
 import config
 from mesh import DuplicateSuppressor
-from packet import Packet, make_replay_packet
+from packet import Packet, make_reply_packet
 
 
 class Routing:
