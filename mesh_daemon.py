@@ -6,7 +6,7 @@ import redis
 
 import config
 from packet import Packet
-from routhing import Routing
+from routing import Routing
 
 
 def main():
