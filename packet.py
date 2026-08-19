@@ -65,6 +65,23 @@ class Packet:
         except (ValueError, IndexError):
             return None
 
+    def can_forward(self) -> bool:
+        """
+        TTLが残っている場合のみ中継可能。
+        """
+        return self.ttl > 0
+
+    def forwarded(self) -> Optional["Packet"]:
+        """
+        TTLを1減らした中継用Packetを生成する。
+        元のPacket自体は変更しない。
+        """
+
+        if not self.can_forward():
+            return None
+
+   
+
 
 def make_ask_packet(
     pkt_id: str,
@@ -98,3 +115,4 @@ def make_reply_packet(
         responder_bst=responder_bst,
         ttl = ttl,
     )
+
