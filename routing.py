@@ -57,20 +57,23 @@ class Routing:
         )
         
     def _handle_ask(self, packet: Packet) -> None:
-        """
-        ASKを受信したときの処理。
-        指定されたデータを持っていて、
-        かつ自分が目標エリアの場合はREPLYを生成する。
-        条件を満たさない場合はASKを中継する。
-        """
+    """
+    ASKを受信したときの処理。
+
+    指定されたデータを持っていて、
+    かつ自分が目標エリアの場合はREPLYを生成する。
+
+    REPLY生成の有無にかかわらず、
+    ASKはTTLが切れるまで中継する。
+    """
         is_target_area = (
             packet.target_bst == config.LOCAL_BST_ID
-        )
+        )        
 
         has_data = (
             packet.data_id in config.MY_DATA_IDS
         )
-
+    
         if is_target_area and has_data:
             print(
                 f"[ASK-DATA-FOUND] "
@@ -80,21 +83,21 @@ class Routing:
                 f"source={packet.source_bst}",
                 flush=True,
             )
-
+    
             reply_packet = make_reply_packet(
                 pkt_id=packet.pkt_id,
                 target_bst=packet.source_bst,
                 data_id=packet.data_id,
                 responder_bst=config.LOCAL_BST_ID,
             )
-
+    
             reply_line = reply_packet.encode()
-
+    
             self.redis.lpush(
                 config.REDIS_RAW_TX,
                 reply_line,
             )
-
+    
             print(
                 f"[REPLY-SEND] "
                 f"id={reply_packet.pkt_id} "
@@ -105,17 +108,17 @@ class Routing:
                 f"line={reply_line}",
                 flush=True,
             )
+    
+        else:
+            print(
+                f"[ASK-FORWARD] "
+                f"id={packet.pkt_id} "
+                f"target_match={is_target_area} "
+                f"has_data={has_data}",
+                flush=True,
+            )
 
-            return
-
-        print(
-            f"[ASK-FORWARD] "
-            f"id={packet.pkt_id} "
-            f"target_match={is_target_area} "
-            f"has_data={has_data}",
-            flush=True,
-        )
-
+        # REPLYした場合でもASKを中継する
         self._forward(packet)
 
     def _handle_reply(self, packet: Packet) -> None:
