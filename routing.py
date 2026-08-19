@@ -57,15 +57,15 @@ class Routing:
         )
         
     def _handle_ask(self, packet: Packet) -> None:
-    """
-    ASKを受信したときの処理。
-
-    指定されたデータを持っていて、
-    かつ自分が目標エリアの場合はREPLYを生成する。
-
-    REPLY生成の有無にかかわらず、
-    ASKはTTLが切れるまで中継する。
-    """
+        """
+        ASKを受信したときの処理。
+    
+        指定されたデータを持っていて、
+        かつ自分が目標エリアの場合はREPLYを生成する。
+    
+        REPLY生成の有無にかかわらず、
+        ASKはTTLが切れるまで中継する。
+        """
         is_target_area = (
             packet.target_bst == config.LOCAL_BST_ID
         )        
