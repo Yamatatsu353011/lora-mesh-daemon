@@ -79,6 +79,16 @@ class Packet:
 
         if not self.can_forward():
             return None
+            
+        return Packet(
+            msg_type=self.msg_type,
+            pkt_id=self.pkt_id,
+            target_bst=self.target_bst,
+            data_id=self.data_id,
+            source_bst=self.source_bst,
+            responder_bst=self.responder_bst,
+            ttl=self.ttl - 1,
+        )
 
    
 
