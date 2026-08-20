@@ -109,14 +109,7 @@ class Routing:
                 flush=True,
             )
     
-        else:
-            print(
-                f"[ASK-FORWARD] "
-                f"id={packet.pkt_id} "
-                f"target_match={is_target_area} "
-                f"has_data={has_data}",
-                flush=True,
-            )
+        
 
         # REPLYした場合でもASKを中継する
         self._forward(packet)
@@ -183,9 +176,4 @@ class Routing:
             packet.msg_type,
             packet.pkt_id,
         )
-        print(
-            f"[MESH-MARK-SENT] "
-            f"type={packet.msg_type} "
-            f"id={packet.pkt_id}",
-            flush=True,
-        )
+        
