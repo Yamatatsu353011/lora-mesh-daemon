@@ -6,6 +6,7 @@ import redis
 import config
 from packet import make_ask_packet
 
+import json
 
 query_count = 0
 
@@ -46,6 +47,14 @@ def send_ask(
     )
 
     line = packet.encode()
+
+    redis_client.publish(
+        config.REDIS_EVENT,
+        json.dumps({
+            "event": "local_packet",
+            "line": line,
+        })
+    )
 
     redis_client.lpush(
         config.REDIS_RAW_TX,
