@@ -174,3 +174,18 @@ class Routing:
             f"line={forward_line}",
             flush=True,
         )
+        
+    def mark_sent(self, packet: Packet) -> None:
+        """
+        自ノードが生成・送信したパケットを処理済みとして登録する。
+        """
+        self.duplicate_suppressor.is_duplicate(
+            packet.msg_type,
+            packet.pkt_id,
+        )
+        print(
+            f"[MESH-MARK-SENT] "
+            f"type={packet.msg_type} "
+            f"id={packet.pkt_id}",
+            flush=True,
+        )
