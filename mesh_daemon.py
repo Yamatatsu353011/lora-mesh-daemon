@@ -43,17 +43,39 @@ def main():
                 )
                 continue
 
-            # LoRa受信イベント以外は処理しない
-            if event.get("event") != "rx":
+            event_type = event.get("event")
+
+            # ----------------------------------------------------
+            # 自分自身が生成したパケット
+            # ----------------------------------------------------
+            if event_type == "local_packet":
+                line = event.get("line")
+            
+                if not isinstance(line, str):
+                    continue
+            
+                packet = Packet.decode(line)
+            
+                if packet is None:
+                    continue
+            
+                routing.mark_sent(packet)
+            
                 continue
-
+            
+            # ----------------------------------------------------
+            # LoRa受信イベント
+            # ----------------------------------------------------
+            if event_type != "rx":
+                continue
+            
             line = event.get("line")
-
+            
             if not isinstance(line, str):
                 continue
-
+            
             packet = Packet.decode(line)
-
+            
             # ビーコンなど、ASK/REPLY以外は無視
             if packet is None:
                 print(
@@ -61,7 +83,7 @@ def main():
                     flush=True,
                 )
                 continue
-
+            
             routing.handle_packet(packet)
         
     except KeyboardInterrupt:
