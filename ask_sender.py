@@ -66,7 +66,7 @@ def main():
             counter += 1
 
             # 1秒待って次のASK
-            time.sleep(1)
+            time.sleep(3)
 
     except KeyboardInterrupt:
         print("\n[ASK-LOOP] stopped")
