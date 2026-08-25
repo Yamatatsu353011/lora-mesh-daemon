@@ -10,7 +10,7 @@ class Routing:
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
         self.duplicate_suppressor = DuplicateSuppressor(
-            retention_sec=300.0
+            retention_sec=30.0
         )
 
     def handle_packet(self, packet: Packet) -> None:
