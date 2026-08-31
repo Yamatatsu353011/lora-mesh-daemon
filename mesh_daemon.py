@@ -73,6 +73,9 @@ def main():
             
             if not isinstance(line, str):
                 continue
+
+            if line.startswith("TESTPING,") or line.startswith("TESTPONG,"):
+                continue
             
             packet = Packet.decode(line)
             
