@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import time
-
+import random
 import redis
 
 import config
@@ -62,6 +62,8 @@ def main():
 
             if tx_line:
                 if len(tx_line) <= config.MAX_TX_LINE_LEN:
+                    delay = random.uniform(0.05, 0.20)
+                    time.sleep(delay)
                     ok = radio.send_payload(tx_line, max_len=config.MAX_TX_LINE_LEN)
 
                     r.publish(
