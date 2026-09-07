@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import redis
-
+import time
 import config
 from mesh import DuplicateSuppressor
 from packet import Packet, make_reply_packet
@@ -92,6 +92,8 @@ class Routing:
             )
     
             reply_line = reply_packet.encode()
+
+            time.sleep(random.uniform(0.1, 0.5))
     
             self.redis.lpush(
                 config.REDIS_RAW_TX,
