@@ -190,6 +190,8 @@ BEACON_FORMAT = "BST_ID"
 # ES920LR binary payload maximum used by the current mesh packet.
 MAX_BINARY_PAYLOAD_LEN = 50
 
+MAX_TX_LINE_LEN = 80
+
 
 # ============================================================
 # Slotted ALOHA / self-position beacon
