@@ -11,7 +11,6 @@ import serial
 import config
 
 from bst_id.encoder import BSTIDEncoder
-from bst_id.decoder import BSTIDDecoder
 from packet import make_ask_packet
 
 
@@ -96,9 +95,9 @@ def read_gps_fix(gps):
 
 def main():
 
-    # -------------------------
+    # --------------------------------------------------------
     # Redis
-    # -------------------------
+    # --------------------------------------------------------
 
     r = redis.Redis(
         host=config.REDIS_HOST,
@@ -108,9 +107,9 @@ def main():
     )
 
 
-    # -------------------------
+    # --------------------------------------------------------
     # GPS
-    # -------------------------
+    # --------------------------------------------------------
 
     gps = serial.Serial(
         config.GPS_SERIAL_PORT,
@@ -119,43 +118,88 @@ def main():
     )
 
 
-    # -------------------------
+    # --------------------------------------------------------
     # ASK destination
-    # -------------------------
+    # --------------------------------------------------------
+    #
+    # 目標地点を経度・緯度で入力
+    #
+    # 例:
+    #   longitude = 139.939698
+    #   latitude  = 37.521844
+    #
+    # --------------------------------------------------------
 
-    goal_bst = int(
-        input("Goal BST-ID: ")
+    goal_lon = float(
+        input("Goal longitude: ")
     )
 
-    bit_len_input = input(
-        "Goal bit length [78]: "
-    ).strip()
+    goal_lat = float(
+        input("Goal latitude : ")
+    )
 
-    if bit_len_input:
-        goal_bit_len = int(bit_len_input)
-    else:
-        goal_bit_len = 78
 
+    # --------------------------------------------------------
+    # Goal GPS -> BST-ID
+    # --------------------------------------------------------
+
+    goal_bst, goal_bit_len = (
+        BSTIDEncoder.encode(
+            goal_lon,
+            goal_lat,
+            None,
+            None,
+            config.BST_ZX,
+            config.BST_ZY,
+            0,
+            0,
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Data ID
+    # --------------------------------------------------------
 
     data_id = input(
         "Data ID: "
     ).strip()
 
 
-    # Goal BST-IDを座標へ戻しておく
-    goal_lon, goal_lat, _, _ = (
-        BSTIDDecoder.decode(
-            goal_bst,
-            goal_bit_len,
-        )
-    )
-
+    # --------------------------------------------------------
+    # Goal information
+    # --------------------------------------------------------
 
     print()
     print("===== Goal =====")
-    print("lat:", goal_lat)
-    print("lon:", goal_lon)
+
+    print(
+        "longitude   :",
+        goal_lon,
+    )
+
+    print(
+        "latitude    :",
+        goal_lat,
+    )
+
+    print(
+        "goal_bst    :",
+        goal_bst,
+    )
+
+    print(
+        "goal_bit_len:",
+        goal_bit_len,
+    )
+
+    print(
+        "data_id     :",
+        data_id,
+    )
+
     print()
+
     print("[ASK-LOOP] started")
 
 
@@ -174,7 +218,7 @@ def main():
 
 
             # ====================================================
-            # GPS -> BST-ID
+            # Current GPS -> BST-ID
             # ====================================================
 
             start_bst, start_bit_len = (
@@ -183,8 +227,8 @@ def main():
                     lat,
                     None,
                     None,
-                    config.BST_ZOOM_X,
-                    config.BST_ZOOM_Y,
+                    config.BST_ZX,
+                    config.BST_ZY,
                     0,
                     0,
                 )
@@ -235,7 +279,10 @@ def main():
             )
 
 
+            # ====================================================
             # Binary
+            # ====================================================
+
             payload = packet.encode()
 
             # RedisではBinaryを直接扱わずHEX文字列にする
@@ -265,13 +312,25 @@ def main():
             )
 
 
+            # ====================================================
+            # Log
+            # ====================================================
+
             print()
             print("===== ASK SEND =====")
-            print("id       :", pkt_id)
 
             print(
-                "GPS       :",
+                "id        :",
+                pkt_id,
+            )
+
+            print(
+                "GPS lat   :",
                 lat,
+            )
+
+            print(
+                "GPS lon   :",
                 lon,
             )
 
@@ -281,8 +340,18 @@ def main():
             )
 
             print(
+                "start_bits:",
+                start_bit_len,
+            )
+
+            print(
                 "goal_bst  :",
                 goal_bst,
+            )
+
+            print(
+                "goal_bits :",
+                goal_bit_len,
             )
 
             print(
@@ -302,12 +371,20 @@ def main():
             )
 
 
+            # ====================================================
+            # Counter
+            # ====================================================
+
             counter += 1
 
             # Packet IDが長くなりすぎないようにする
             if counter > 9999:
                 counter = 1
 
+
+            # ====================================================
+            # Interval
+            # ====================================================
 
             time.sleep(3)
 
