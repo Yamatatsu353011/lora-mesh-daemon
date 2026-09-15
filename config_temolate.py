@@ -4,63 +4,92 @@
 # Node identity
 # ============================================================
 
+# Change for each node
+# Example:
+#   yaglabterm01 -> NODE_ID = "yaglabterm01", OWN_ID = "0001"
+#   yaglabterm02 -> NODE_ID = "yaglabterm02", OWN_ID = "0002"
+#   yaglabterm03 -> NODE_ID = "yaglabterm03", OWN_ID = "0003"
+
 NODE_ID = "yaglabterm02"
 
 # EASEL own node ID
-# yaglabterm01: "0001"
-# yaglabterm02: "0002"
 OWN_ID = "0002"
 
-LOCAL_BST_ID = 200
+# Data held by this node
 MY_DATA_IDS = {"a", "b", "c"}
+
+# ============================================================
+# Position source
+# ============================================================
+
+# GPSがないノードはTrue
+USE_DUMMY_GPS = True
+
+# 仮座標
+DUMMY_LAT = 37.521844
+DUMMY_LON = 139.939698
+
 
 # ============================================================
 # Serial port
 # ============================================================
 
+# Raspberry Pi / Ubuntu
 SERIAL_PORT = "/dev/lora0"
+
 BAUDRATE = 115200
 SERIAL_TIMEOUT_SEC = 0.5
+
 
 # ============================================================
 # EASEL ES920LR radio settings
 # ============================================================
-# Command spec:
-#   bw:
-#     3 = 62.5 kHz
-#     4 = 125 kHz
-#     5 = 250 kHz
-#     6 = 500 kHz
 #
-#   sf:
-#     7 - 12
+# bw:
+#   3 = 62.5 kHz
+#   4 = 125 kHz
+#   5 = 250 kHz
+#   6 = 500 kHz
 #
-#   channel:
-#     62.5/125 kHz: 1 - 15
-#     250 kHz:      1 - 7
-#     500 kHz:      1 - 5
+# sf:
+#   7 - 12
 #
-# Current test setting:
-#   500 kHz, SF8, channel 1
+# channel:
+#   62.5/125 kHz : 1 - 15
+#   250 kHz      : 1 - 7
+#   500 kHz      : 1 - 5
+#
+# Current setting:
+#   500 kHz
+#   SF8
+#   Channel 1
+#   Payload mode
+#   Binary mode
+# ============================================================
 
 BW = "6"
 SF = "8"
 CH = "1"
 
 PAN_ID = "ABCD"
-DST_ID = "FFFF"   # Broadcast
+DST_ID = "FFFF"      # Broadcast
 
-ACK = "2"         # 1: ON, 2: OFF
+ACK = "2"            # 1: ON, 2: OFF
 RETRY = "0"
-TRANSMODE = "1"   # 1: Payload, 2: Frame
-FORMAT = "1"      # 1: ASCII, 2: BINARY
 
-RCVID = "2"       # 1: ON, 2: OFF
-RSSI = "2"        # 1: ON, 2: OFF
-POWER = "13"      # -4 to 13 dBm
+TRANSMODE = "1"      # 1: Payload, 2: Frame
+FORMAT = "2"         # 1: ASCII, 2: BINARY
 
-# Commands sent before start.
-# Keep this list as the single source of truth for EASEL setup.
+RCVID = "2"          # 1: ON, 2: OFF
+RSSI = "2"           # 1: ON, 2: OFF
+
+POWER = "13"         # -4 to 13 dBm
+
+
+# ============================================================
+# Commands sent to ES920LR before start
+# ============================================================
+
 EASEL_CONFIG_COMMANDS = [
     ("bw", BW),
     ("sf", SF),
@@ -77,58 +106,109 @@ EASEL_CONFIG_COMMANDS = [
     ("power", POWER),
 ]
 
+
 # ============================================================
 # Redis
 # ============================================================
 
 REDIS_ENABLED = True
+
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
 REDIS_DB = 0
 
+
+# ------------------------------------------------------------
+# LoRa raw TX / RX
+# ------------------------------------------------------------
+
 REDIS_RAW_TX = "lora:raw:tx"
 REDIS_RAW_RX = "lora:raw:rx"
+
+
+# ------------------------------------------------------------
+# LoRa event channel
+# ------------------------------------------------------------
+
 REDIS_EVENT = "lora:event"
+
+
+# ------------------------------------------------------------
+# Radio state
+# ------------------------------------------------------------
+
 REDIS_STATE = "lora:state:radio"
 
+
+# ------------------------------------------------------------
+# Own GPS position
+#
+# gps-redis-service etc. writes own GPS information here.
+# mesh/routing reads this and generates BST-ID.
+# ------------------------------------------------------------
+
+REDIS_GPS_STATE_KEY = "state:self"
+
+
+# ------------------------------------------------------------
+# Other node positions
+#
+# Example:
+#   lora:nodes:0001
+#   lora:nodes:0002
+#   lora:nodes:0003
+# ------------------------------------------------------------
+
+REDIS_NODE_PREFIX = "lora:nodes:"
+
+# Node-position expiration time
+REDIS_NODE_TTL_SEC = 60
+
+
 # ============================================================
-# Safety
+# BST-ID settings
 # ============================================================
 
-MAX_TX_LINE_LEN = 80
+# Current system uses X/Y only.
+#
+# X = longitude
+# Y = latitude
+#
+# Zoom 32 is used for the current GPS/BST-ID implementation.
+
+BST_ZX = 32
+BST_ZY = 32
+
+# LoRa position representation
+BEACON_FORMAT = "BST_ID"
+
 
 # ============================================================
-# Slotted ALOHA self-position beacon
+# Binary LoRa packet
+# ============================================================
+
+# ES920LR binary payload maximum used by the current mesh packet.
+MAX_BINARY_PAYLOAD_LEN = 50
+
+
+# ============================================================
+# Slotted ALOHA / self-position beacon
 # ============================================================
 
 SLOTTED_ENABLED = True
 
-# 5秒に1回、自ノード位置を送信
+# One frame every 5 seconds
 FRAME_SEC = 5.0
 
-# 10台程度を想定して 0.5秒slot × 10 slots
+# 0.5 sec slot x 10 slots
 SLOT_SEC = 0.5
 
-# slotの端を避けるため、slot開始からこの秒数だけ待って送る
+# Avoid slot boundary
 TX_GUARD_SEC = 0.05
 
-# 1 frameにつき1回だけTX
+# Send own position once per frame
 SELF_BEACON_ENABLED = True
 
-# RedisからGPS状態を読む
-REDIS_GPS_STATE_KEY = "state:self"
-
-# 他ノード状態保存先
-REDIS_NODE_PREFIX = "lora:nodes:"
-REDIS_NODE_TTL_SEC = 60
-
-# RX履歴
-REDIS_RAW_RX = "lora:raw:rx"
-REDIS_EVENT = "lora:event"
-REDIS_STATE = "lora:state:radio"
-
-# 最大送信長
-MAX_TX_LINE_LEN = 80
 
 # ============================================================
 # Redis cleanup on daemon startup
@@ -142,13 +222,3 @@ REDIS_CLEAN_PATTERNS = [
     "lora:state:radio",
     "lora:nodes:*",
 ]
-# ============================================================
-# BST-ID settings
-# ============================================================
-
-BST_ZX = 16
-BST_ZY = 16
-
-# For now, LoRa beacon uses official BST-ID generated by bst-id-main.
-BEACON_FORMAT = "BST_ID"
-

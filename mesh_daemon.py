@@ -59,6 +59,25 @@ def main():
         decode_responses=True,
     )
 
+    if getattr(config, "USE_DUMMY_GPS", False):
+    dummy_position = {
+        "lat": config.DUMMY_LAT,
+        "lon": config.DUMMY_LON,
+        "source": "dummy",
+    }
+
+    r.set(
+        config.REDIS_GPS_STATE_KEY,
+        json.dumps(dummy_position)
+    )
+
+    print(
+        f"[DUMMY-GPS] "
+        f"lat={config.DUMMY_LAT} "
+        f"lon={config.DUMMY_LON}",
+        flush=True,
+    )
+
 
     # ============================================================
     # Routing
