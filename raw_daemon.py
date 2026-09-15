@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
+
 import json
 import time
-import random
+
 import redis
 
 import config
@@ -13,10 +14,19 @@ def now_ms() -> int:
 
 
 def json_dumps(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        obj,
+        ensure_ascii=False,
+        separators=(",", ":")
+    )
 
 
 def main():
+
+    # ============================================================
+    # Redis
+    # ============================================================
+
     r = redis.Redis(
         host=config.REDIS_HOST,
         port=config.REDIS_PORT,
@@ -24,28 +34,75 @@ def main():
         decode_responses=True,
     )
 
-    radio = EaselRadio(debug=True)
+
+    # ============================================================
+    # LoRa
+    # ============================================================
+
+    radio = EaselRadio(
+        debug=True
+    )
 
     radio.open()
     radio.configure_from_config()
 
-    print("[RAW-DAEMON] started", flush=True)
+    print(
+        "[RAW-DAEMON] started",
+        flush=True
+    )
+
 
     try:
+
         while True:
-            # ----------------------------------------------------
-            # RX from LoRa
-            # ----------------------------------------------------
-            line = radio.read_line()
-            if line:
+
+            # ====================================================
+            # RX
+            #
+            # LoRa Binary
+            #      ↓
+            # bytes
+            #      ↓
+            # HEX文字列
+            #      ↓
+            # Redis
+            # ====================================================
+
+            payload = radio.read_binary_payload(
+                timeout_sec=0.1
+            )
+
+
+            if payload is not None:
+
+                payload_hex = payload.hex()
+
                 obj = {
                     "node_id": config.NODE_ID,
-                    "line": line,
+                    "payload_hex": payload_hex,
                     "received_at_ms": now_ms(),
                 }
 
-                r.lpush(config.REDIS_RAW_RX, json_dumps(obj))
-                r.ltrim(config.REDIS_RAW_RX, 0, 99)
+
+                # -------------------------
+                # RX履歴
+                # -------------------------
+
+                r.lpush(
+                    config.REDIS_RAW_RX,
+                    json_dumps(obj)
+                )
+
+                r.ltrim(
+                    config.REDIS_RAW_RX,
+                    0,
+                    99
+                )
+
+
+                # -------------------------
+                # mesh_daemonへ通知
+                # -------------------------
 
                 r.publish(
                     config.REDIS_EVENT,
@@ -55,45 +112,116 @@ def main():
                     })
                 )
 
-            # ----------------------------------------------------
-            # TX from Redis
-            # ----------------------------------------------------
-            tx_line = r.rpop(config.REDIS_RAW_TX)
 
-            if tx_line:
-                if len(tx_line) <= config.MAX_TX_LINE_LEN:
-                    ok = radio.send_payload(tx_line, max_len=config.MAX_TX_LINE_LEN)
+                print(
+                    f"[RAW-RX] "
+                    f"len={len(payload)} "
+                    f"hex={payload_hex}",
+                    flush=True
+                )
 
-                    r.publish(
-                        config.REDIS_EVENT,
-                        json_dumps({
-                            "event": "tx",
-                            "node_id": config.NODE_ID,
-                            "line": tx_line,
-                            "ok": ok,
-                            "sent_at_ms": now_ms(),
-                        })
+
+            # ====================================================
+            # TX
+            #
+            # Redis
+            #   ↓
+            # HEX文字列
+            #   ↓
+            # bytes
+            #   ↓
+            # LoRa Binary
+            # ====================================================
+
+            tx_hex = r.rpop(
+                config.REDIS_RAW_TX
+            )
+
+
+            if tx_hex:
+
+                try:
+
+                    payload = bytes.fromhex(
+                        tx_hex
                     )
-                else:
+
+
+                except ValueError:
+
                     print(
-                        f"[DROP] too long len={len(tx_line)} max={config.MAX_TX_LINE_LEN}",
+                        f"[TX-DROP] "
+                        f"invalid hex: {tx_hex}",
                         flush=True
                     )
+
+                    continue
+
+
+                # ES920LRは最大50 byte
+                if len(payload) > 50:
+
+                    print(
+                        f"[TX-DROP] "
+                        f"too long "
+                        f"len={len(payload)} "
+                        f"max=50",
+                        flush=True
+                    )
+
 
                     r.publish(
                         config.REDIS_EVENT,
                         json_dumps({
                             "event": "tx_drop_too_long",
                             "node_id": config.NODE_ID,
-                            "line_len": len(tx_line),
-                            "max_len": config.MAX_TX_LINE_LEN,
+                            "payload_len": len(payload),
+                            "max_len": 50,
                             "at_ms": now_ms(),
                         })
                     )
 
-            # ----------------------------------------------------
+                    continue
+
+
+                # -------------------------
+                # Binary LoRa送信
+                # -------------------------
+
+                ok = radio.send_binary_payload(
+                    payload
+                )
+
+
+                # -------------------------
+                # TXイベント
+                # -------------------------
+
+                r.publish(
+                    config.REDIS_EVENT,
+                    json_dumps({
+                        "event": "tx",
+                        "node_id": config.NODE_ID,
+                        "payload_hex": tx_hex,
+                        "ok": ok,
+                        "sent_at_ms": now_ms(),
+                    })
+                )
+
+
+                print(
+                    f"[RAW-TX] "
+                    f"len={len(payload)} "
+                    f"ok={ok} "
+                    f"hex={tx_hex}",
+                    flush=True
+                )
+
+
+            # ====================================================
             # State
-            # ----------------------------------------------------
+            # ====================================================
+
             state = {
                 "node_id": config.NODE_ID,
                 "port": config.SERIAL_PORT,
@@ -104,14 +232,30 @@ def main():
                 "panid": config.PAN_ID,
                 "ownid": config.OWN_ID,
                 "dstid": config.DST_ID,
+                "format": config.FORMAT,
                 "updated_at_ms": now_ms(),
             }
 
-            r.set(config.REDIS_STATE, json_dumps(state))
+
+            r.set(
+                config.REDIS_STATE,
+                json_dumps(state)
+            )
+
 
             time.sleep(0.05)
 
+
+    except KeyboardInterrupt:
+
+        print(
+            "\n[RAW-DAEMON] stopped",
+            flush=True
+        )
+
+
     finally:
+
         radio.close()
 
 
