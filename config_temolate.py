@@ -40,6 +40,16 @@ SERIAL_PORT = "/dev/lora0"
 BAUDRATE = 115200
 SERIAL_TIMEOUT_SEC = 0.5
 
+# ============================================================
+# GPS
+# ============================================================
+
+GPS_SERIAL_PORT = "/dev/lora1"
+GPS_BAUDRATE = 9600
+
+BST_ZOOM_X = 32
+BST_ZOOM_Y = 32
+
 
 # ============================================================
 # EASEL ES920LR radio settings
