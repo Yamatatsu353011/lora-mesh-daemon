@@ -432,6 +432,9 @@ class EaselRadio:
 
             length = length_raw[0]
 
+            if length == 0:
+                continue
+
             # RF payloadは最大50byte。
             # OK / NGレスポンスも十分小さい。
             if length > 50:
