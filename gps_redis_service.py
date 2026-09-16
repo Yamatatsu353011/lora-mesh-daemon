@@ -10,7 +10,25 @@ import serial
 import config
 
 
+def write_position(r, lat, lon, source):
+    state = {
+        "lat": float(lat),
+        "lon": float(lon),
+        "source": source,
+        "updated_at": time.time(),
+    }
+
+    r.set(
+        config.REDIS_GPS_STATE_KEY,
+        json.dumps(state),
+    )
+
+
 def main():
+
+    # ============================================================
+    # Redis
+    # ============================================================
 
     r = redis.Redis(
         host=config.REDIS_HOST,
@@ -19,17 +37,47 @@ def main():
         decode_responses=True,
     )
 
+
+    # ============================================================
+    # Dummy position
+    # ============================================================
+
+    if config.USE_DUMMY_GPS:
+
+        print(
+            f"[GPS-REDIS] dummy mode "
+            f"lat={config.DUMMY_LAT} "
+            f"lon={config.DUMMY_LON}",
+            flush=True,
+        )
+
+        while True:
+
+            write_position(
+                r,
+                config.DUMMY_LAT,
+                config.DUMMY_LON,
+                "dummy",
+            )
+
+            time.sleep(1)
+
+
+    # ============================================================
+    # Real GPS
+    # ============================================================
+
+    print(
+        f"[GPS-REDIS] real GPS mode "
+        f"port={config.GPS_SERIAL_PORT} "
+        f"baud={config.GPS_BAUDRATE}",
+        flush=True,
+    )
+
     gps = serial.Serial(
         config.GPS_SERIAL_PORT,
         config.GPS_BAUDRATE,
         timeout=1,
-    )
-
-    print(
-        f"[GPS-REDIS] started "
-        f"port={config.GPS_SERIAL_PORT} "
-        f"baud={config.GPS_BAUDRATE}",
-        flush=True,
     )
 
     try:
@@ -60,20 +108,16 @@ def main():
             lat = float(msg.latitude)
             lon = float(msg.longitude)
 
-            state = {
-                "lat": lat,
-                "lon": lon,
-                "source": "gps",
-                "updated_at": time.time(),
-            }
-
-            r.set(
-                config.REDIS_GPS_STATE_KEY,
-                json.dumps(state),
+            write_position(
+                r,
+                lat,
+                lon,
+                "gps",
             )
 
             print(
-                f"[GPS] lat={lat:.8f} "
+                f"[GPS] "
+                f"lat={lat:.8f} "
                 f"lon={lon:.8f}",
                 flush=True,
             )
