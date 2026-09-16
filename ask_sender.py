@@ -4,9 +4,7 @@ import json
 import math
 import time
 
-import pynmea2
 import redis
-import serial
 
 import config
 
@@ -52,39 +50,67 @@ def haversine_distance_m(
 
 
 # ============================================================
-# GPS
+# Position from Redis
 # ============================================================
 
-def read_gps_fix(gps):
+def read_position_from_redis(r):
     """
-    有効なGGAを受け取るまで待つ。
+    Redisの state:self から現在位置を取得する。
+
+    期待する形式:
+    {
+        "lat": 37.521844,
+        "lon": 139.939698
+    }
     """
 
     while True:
 
-        line = gps.readline().decode(
-            "ascii",
-            errors="ignore"
-        ).strip()
+        raw = r.get(
+            config.REDIS_GPS_STATE_KEY
+        )
 
-        if not (
-            line.startswith("$GNGGA")
-            or line.startswith("$GPGGA")
-        ):
+        if raw is None:
+            print(
+                f"[POSITION] waiting for "
+                f"{config.REDIS_GPS_STATE_KEY} ..."
+            )
+            time.sleep(1)
             continue
 
         try:
-            msg = pynmea2.parse(line)
+            position = json.loads(raw)
 
-        except pynmea2.ParseError:
+        except json.JSONDecodeError:
+            print(
+                "[POSITION] invalid JSON:",
+                raw,
+            )
+            time.sleep(1)
             continue
 
-        # GPS Fixなし
-        if int(msg.gps_qual or 0) == 0:
+        lat = position.get("lat")
+        lon = position.get("lon")
+
+        if lat is None or lon is None:
+            print(
+                "[POSITION] lat/lon not found:",
+                position,
+            )
+            time.sleep(1)
             continue
 
-        lat = msg.latitude
-        lon = msg.longitude
+        try:
+            lat = float(lat)
+            lon = float(lon)
+
+        except (TypeError, ValueError):
+            print(
+                "[POSITION] invalid lat/lon:",
+                position,
+            )
+            time.sleep(1)
+            continue
 
         return lat, lon
 
@@ -104,17 +130,6 @@ def main():
         port=config.REDIS_PORT,
         db=config.REDIS_DB,
         decode_responses=True,
-    )
-
-
-    # --------------------------------------------------------
-    # GPS
-    # --------------------------------------------------------
-
-    gps = serial.Serial(
-        config.GPS_SERIAL_PORT,
-        config.GPS_BAUDRATE,
-        timeout=1,
     )
 
 
@@ -140,7 +155,7 @@ def main():
 
 
     # --------------------------------------------------------
-    # Goal GPS -> BST-ID
+    # Goal coordinate -> BST-ID
     # --------------------------------------------------------
 
     goal_bst, goal_bit_len = (
@@ -199,7 +214,6 @@ def main():
     )
 
     print()
-
     print("[ASK-LOOP] started")
 
 
@@ -211,14 +225,14 @@ def main():
         while True:
 
             # ====================================================
-            # Current GPS
+            # Current position from Redis
             # ====================================================
 
-            lat, lon = read_gps_fix(gps)
+            lat, lon = read_position_from_redis(r)
 
 
             # ====================================================
-            # Current GPS -> BST-ID
+            # Current position -> BST-ID
             # ====================================================
 
             start_bst, start_bit_len = (
@@ -249,9 +263,6 @@ def main():
 
             # ====================================================
             # Packet ID
-            #
-            # BST-IDをPacket IDに使うと長すぎるため
-            # LoRaモジュールのOWN_IDを使用
             # ====================================================
 
             pkt_id = (
@@ -325,12 +336,12 @@ def main():
             )
 
             print(
-                "GPS lat   :",
+                "lat       :",
                 lat,
             )
 
             print(
-                "GPS lon   :",
+                "lon       :",
                 lon,
             )
 
@@ -377,7 +388,6 @@ def main():
 
             counter += 1
 
-            # Packet IDが長くなりすぎないようにする
             if counter > 9999:
                 counter = 1
 
@@ -394,11 +404,6 @@ def main():
         print(
             "\n[ASK-LOOP] stopped"
         )
-
-
-    finally:
-
-        gps.close()
 
 
 if __name__ == "__main__":
