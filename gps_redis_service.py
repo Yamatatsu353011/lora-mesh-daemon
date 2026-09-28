@@ -37,7 +37,6 @@ def main():
         decode_responses=True,
     )
 
-
     # ============================================================
     # Dummy position
     # ============================================================
@@ -51,17 +50,26 @@ def main():
             flush=True,
         )
 
-        while True:
+        try:
+            while True:
 
-            write_position(
-                r,
-                config.DUMMY_LAT,
-                config.DUMMY_LON,
-                "dummy",
+                write_position(
+                    r,
+                    config.DUMMY_LAT,
+                    config.DUMMY_LON,
+                    "dummy",
+                )
+
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+
+            print(
+                "[GPS-REDIS] stopped",
+                flush=True,
             )
 
-            time.sleep(1)
-
+        return
 
     # ============================================================
     # Real GPS
