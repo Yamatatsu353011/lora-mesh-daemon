@@ -12,3 +12,9 @@ __pycache__/
 
 *.bak
 *.tmp
+config.py
+binary_packet_test.py
+binary_tx_test.py
+bst_test.py
+gps_test.py
+test.py
