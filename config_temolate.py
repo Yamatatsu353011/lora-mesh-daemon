@@ -210,13 +210,13 @@ MAX_TX_LINE_LEN = 80
 SLOTTED_ENABLED = True
 
 # One frame every 5 seconds
-FRAME_SEC = 5.0
+FRAME_SEC = 1.0
 
 # 0.5 sec slot x 10 slots
-SLOT_SEC = 0.5
+SLOT_SEC = 0.2
 
 # Avoid slot boundary
-TX_GUARD_SEC = 0.05
+TX_GUARD_SEC = 0.02
 
 # Send own position once per frame
 SELF_BEACON_ENABLED = True
