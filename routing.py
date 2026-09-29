@@ -19,7 +19,7 @@ class Routing:
         self.redis = redis_client
 
         self.duplicate_suppressor = DuplicateSuppressor(
-            retention_sec=30.0
+            retention_sec=180.0
         )
 
     # ============================================================
