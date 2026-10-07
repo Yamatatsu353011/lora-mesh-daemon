@@ -15,12 +15,15 @@ from packet import Packet, make_reply_packet
 
 
 class Routing:
+
     def __init__(self, redis_client: redis.Redis):
+
         self.redis = redis_client
 
         self.duplicate_suppressor = DuplicateSuppressor(
             retention_sec=180.0
         )
+
 
     # ============================================================
     # 自ノードの現在BST-ID取得
@@ -39,13 +42,16 @@ class Routing:
         )
 
         if not raw:
+
             print(
                 "[GPS] local position unavailable",
                 flush=True,
             )
+
             return None
 
         try:
+
             state = json.loads(raw)
 
             lat = float(state["lat"])
@@ -57,10 +63,12 @@ class Routing:
             KeyError,
             json.JSONDecodeError,
         ):
+
             print(
                 f"[GPS] invalid state: {raw}",
                 flush=True,
             )
+
             return None
 
         bst_id, bit_len = BSTIDEncoder.encode(
@@ -75,6 +83,7 @@ class Routing:
         )
 
         return bst_id, bit_len
+
 
     # ============================================================
     # Redis TX
@@ -97,6 +106,7 @@ class Routing:
             payload_hex,
         )
 
+
     # ============================================================
     # Packet受信
     # ============================================================
@@ -114,12 +124,14 @@ class Routing:
             packet.msg_type,
             packet.pkt_id,
         ):
+
             print(
                 f"[MESH-DROP] duplicate "
                 f"type={packet.msg_type} "
                 f"id={packet.pkt_id}",
                 flush=True,
             )
+
             return
 
         print(
@@ -135,10 +147,12 @@ class Routing:
         )
 
         if packet.msg_type == "ASK":
+
             self._handle_ask(packet)
             return
 
         if packet.msg_type == "REPLY":
+
             self._handle_reply(packet)
             return
 
@@ -146,6 +160,7 @@ class Routing:
             f"[MESH-DROP] unknown type={packet.msg_type}",
             flush=True,
         )
+
 
     # ============================================================
     # ASK
@@ -158,21 +173,20 @@ class Routing:
         ・自分が目標BST-IDのエリア
         ・data_idを持っている
 
-        の両方を満たせばREPLYを生成し、
-        そのASKはそれ以上中継しない。
+        の両方を満たせばREPLY。
 
-        条件を満たさない場合のみASKを中継する。
+        ★変更:
+        REPLYを生成した場合、そのASKはそれ以上中継しない。
         """
 
-        # ASK送信元の位置を保存
         self._save_sender_position(packet)
 
-        # 自ノードの現在BST-ID
         local = self._get_local_bst()
 
         is_target_area = False
 
         if local is not None:
+
             local_bst, local_bit_len = local
 
             is_target_area = is_match(
@@ -192,10 +206,9 @@ class Routing:
             flush=True,
         )
 
+
         # --------------------------------------------------------
         # 目標エリア ＋ データあり
-        # → REPLY生成
-        # → ASKはここで終了
         # --------------------------------------------------------
 
         if (
@@ -203,6 +216,7 @@ class Routing:
             and has_data
             and local is not None
         ):
+
             local_bst, local_bit_len = local
 
             print(
@@ -214,8 +228,11 @@ class Routing:
                 flush=True,
             )
 
-            # REPLYの目的地は
-            # ASKを最初に生成したノード
+
+            # ----------------------------------------------------
+            # REPLY生成
+            # ----------------------------------------------------
+
             reply_packet = make_reply_packet(
                 pkt_id=packet.pkt_id,
 
@@ -232,11 +249,20 @@ class Routing:
                 distance=0.0,
             )
 
+
+            # ----------------------------------------------------
             # 自分自身が生成したREPLYを
-            # duplicateとして登録
+            # Duplicate Suppressionへ登録
+            # ----------------------------------------------------
+
             self.mark_sent(
                 reply_packet
             )
+
+
+            # ----------------------------------------------------
+            # REPLY送信キューへ
+            # ----------------------------------------------------
 
             self._send_packet(
                 reply_packet
@@ -252,17 +278,15 @@ class Routing:
                 flush=True,
             )
 
-            # ----------------------------------------------------
-            # REPLYを生成したので
-            # このASKはそれ以上中継しない
-            # ----------------------------------------------------
             return
+
 
         # --------------------------------------------------------
         # 目標条件を満たさなかったASKだけ中継
         # --------------------------------------------------------
 
         self._forward(packet)
+
 
     # ============================================================
     # REPLY
@@ -272,26 +296,57 @@ class Routing:
         """
         REPLY受信処理。
 
-        自分がgoalなら到着。
-        それ以外なら中継。
+        ★変更:
+        goal_bstと現在位置の一致ではなく、
+        pkt_idに含まれているASK生成元ノードIDで
+        最終到達を判定する。
+
+        例:
+
+            pkt_id = "0003-125"
+
+        の場合、
+
+            origin_node_id = "0003"
+
+        自分のOWN_IDが0003なら、
+        このREPLYは自分宛てと判断する。
+
+        goal_bstはREPLYの方向判断用として残す。
         """
 
-        local = self._get_local_bst()
 
-        is_arrived = False
+        # ========================================================
+        # ★変更2
+        # Packet IDからASK生成元ノードIDを取得
+        # ========================================================
 
-        if local is not None:
-            local_bst, local_bit_len = local
+        # 例:
+        #
+        #   "0003-125"
+        #
+        #        ↓
+        #
+        #   "0003"
+        #
 
-            is_arrived = is_match(
-                packet.goal_bst,
-                local_bst,
-            )
+        origin_node_id = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
 
-        if is_arrived:
+
+        # ========================================================
+        # ★変更2
+        # REPLY最終到達判定
+        # ========================================================
+
+        if origin_node_id == str(config.OWN_ID):
+
             print(
                 f"[REPLY-ARRIVED] "
                 f"id={packet.pkt_id} "
+                f"origin={origin_node_id} "
                 f"goal={packet.goal_bst} "
                 f"data={packet.data_id} "
                 f"reply_start={packet.start_bst}",
@@ -300,7 +355,14 @@ class Routing:
 
             return
 
+
+        # --------------------------------------------------------
+        # 自分宛てではないREPLY
+        # → 中継
+        # --------------------------------------------------------
+
         self._forward(packet)
+
 
     # ============================================================
     # Forward
@@ -308,18 +370,20 @@ class Routing:
 
     def _forward(self, packet: Packet) -> None:
         """
-        TTLだけで中継判断する。
+        現在はTTLだけで中継判断する。
 
         distanceによる中継制御はまだ行わない。
         """
 
         if not packet.can_forward():
+
             print(
                 f"[MESH-DROP] ttl expired "
                 f"type={packet.msg_type} "
                 f"id={packet.pkt_id}",
                 flush=True,
             )
+
             return
 
         forward_packet = packet.forwarded()
@@ -339,6 +403,7 @@ class Routing:
             flush=True,
         )
 
+
     # ============================================================
     # 自ノード送信Packet登録
     # ============================================================
@@ -354,6 +419,7 @@ class Routing:
             packet.pkt_id,
         )
 
+
     # ============================================================
     # ASK送信元位置保存
     # ============================================================
@@ -365,27 +431,39 @@ class Routing:
         """
 
         try:
+
             lon, lat, _, _ = BSTIDDecoder.decode(
                 packet.start_bst,
                 packet.start_bit_len,
             )
 
         except Exception as e:
+
             print(
                 f"[NODE-POS-ERR] BST decode failed: {e}",
                 flush=True,
             )
+
             return
 
         if lat is None or lon is None:
+
             print(
                 "[NODE-POS-ERR] lat/lon is None",
                 flush=True,
             )
+
             return
 
-        # pkt_id = "0001-20" → node_id = "0001"
-        node_id = packet.pkt_id.split("-", 1)[0]
+
+        # pkt_id = "0001-20"
+        #       ↓
+        # node_id = "0001"
+
+        node_id = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
 
         node_state = {
             "node_id": node_id,
