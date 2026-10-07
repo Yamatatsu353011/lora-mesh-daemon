@@ -241,13 +241,6 @@ def main():
 
             if queue_len > 0:
 
-                print(
-                    f"[ASK-WAIT] "
-                    f"TX queue is not empty: "
-                    f"{queue_len}",
-                    flush=True,
-                )
-
                 time.sleep(0.1)
                 continue
 
