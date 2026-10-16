@@ -125,26 +125,8 @@ class Routing:
             packet.pkt_id,
         ):
 
-            print(
-                f"[MESH-DROP] duplicate "
-                f"type={packet.msg_type} "
-                f"id={packet.pkt_id}",
-                flush=True,
-            )
-
             return
 
-        print(
-            f"[MESH-RX] "
-            f"type={packet.msg_type} "
-            f"id={packet.pkt_id} "
-            f"goal={packet.goal_bst} "
-            f"start={packet.start_bst} "
-            f"data={packet.data_id} "
-            f"ttl={packet.ttl} "
-            f"distance={packet.distance}",
-            flush=True,
-        )
 
         if packet.msg_type == "ASK":
 
@@ -198,14 +180,6 @@ class Routing:
             packet.data_id
             in config.MY_DATA_IDS
         )
-
-        print(
-            f"[ASK-CHECK] "
-            f"target_area={is_target_area} "
-            f"has_data={has_data}",
-            flush=True,
-        )
-
 
         # --------------------------------------------------------
         # 目標エリア ＋ データあり
@@ -376,13 +350,6 @@ class Routing:
         """
 
         if not packet.can_forward():
-
-            print(
-                f"[MESH-DROP] ttl expired "
-                f"type={packet.msg_type} "
-                f"id={packet.pkt_id}",
-                flush=True,
-            )
 
             return
 
