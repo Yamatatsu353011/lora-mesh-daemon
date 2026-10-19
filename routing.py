@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import math
 
 import redis
 
@@ -83,6 +84,107 @@ class Routing:
         )
 
         return bst_id, bit_len
+
+
+    # ============================================================
+    # 自ノードの現在緯度経度取得
+    # ============================================================
+
+    def _get_local_position(self):
+        """
+        Redis state:self から自ノードの lat/lon を取得する。
+        """
+
+        raw = self.redis.get(
+            config.REDIS_GPS_STATE_KEY
+        )
+
+        if not raw:
+            return None
+
+        try:
+            state = json.loads(raw)
+            lat = float(state["lat"])
+            lon = float(state["lon"])
+
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            json.JSONDecodeError,
+        ):
+            return None
+
+        return lat, lon
+
+
+    # ============================================================
+    # 2点間距離
+    # ============================================================
+
+    @staticmethod
+    def _haversine_distance_m(lat1, lon1, lat2, lon2):
+        """
+        緯度経度2点間の距離[m]をHaversine式で求める。
+        """
+
+        earth_radius_m = 6371000.0
+
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        d_phi = math.radians(lat2 - lat1)
+        d_lambda = math.radians(lon2 - lon1)
+
+        a = (
+            math.sin(d_phi / 2.0) ** 2
+            + math.cos(phi1)
+            * math.cos(phi2)
+            * math.sin(d_lambda / 2.0) ** 2
+        )
+
+        c = 2.0 * math.atan2(
+            math.sqrt(a),
+            math.sqrt(1.0 - a),
+        )
+
+        return earth_radius_m * c
+
+
+    # ============================================================
+    # 自ノード -> 指定BST-ID の距離
+    # ============================================================
+
+    def _distance_to_bst(self, goal_bst, goal_bit_len):
+        """
+        自ノードの現在位置から指定BST-IDまでの距離[m]を返す。
+        計算できない場合はNone。
+        """
+
+        local_position = self._get_local_position()
+
+        if local_position is None:
+            return None
+
+        local_lat, local_lon = local_position
+
+        try:
+            goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(
+                goal_bst,
+                goal_bit_len,
+            )
+
+        except Exception:
+            return None
+
+        if goal_lat is None or goal_lon is None:
+            return None
+
+        return self._haversine_distance_m(
+            local_lat,
+            local_lon,
+            goal_lat,
+            goal_lon,
+        )
 
 
     # ============================================================
@@ -204,6 +306,28 @@ class Routing:
 
 
             # ----------------------------------------------------
+            # REPLY生成ノード -> ASK生成元位置 の距離
+            # ----------------------------------------------------
+
+            reply_distance = self._distance_to_bst(
+                packet.start_bst,
+                packet.start_bit_len,
+            )
+
+            if reply_distance is None:
+
+                print(
+                    f"[DIRECTION-DROP] "
+                    f"type=REPLY "
+                    f"id={packet.pkt_id} "
+                    f"reason=distance_unavailable",
+                    flush=True,
+                )
+
+                return
+
+
+            # ----------------------------------------------------
             # REPLY生成
             # ----------------------------------------------------
 
@@ -219,8 +343,8 @@ class Routing:
 
                 data_id=packet.data_id,
 
-                # 距離によるroutingはまだ使わない
-                distance=0.0,
+                # REPLY生成地点からgoalまでの初期距離
+                distance=reply_distance,
             )
 
 
@@ -248,7 +372,8 @@ class Routing:
                 f"goal={reply_packet.goal_bst} "
                 f"start={reply_packet.start_bst} "
                 f"data={reply_packet.data_id} "
-                f"ttl={reply_packet.ttl}",
+                f"ttl={reply_packet.ttl} "
+                f"distance={reply_packet.distance:.2f}",
                 flush=True,
             )
 
@@ -269,40 +394,13 @@ class Routing:
     def _handle_reply(self, packet: Packet) -> None:
         """
         REPLY受信処理。
-
-        ★変更:
-        goal_bstと現在位置の一致ではなく、
-        pkt_idに含まれているASK生成元ノードIDで
-        最終到達を判定する。
-
-        例:
-
-            pkt_id = "0003-125"
-
-        の場合、
-
-            origin_node_id = "0003"
-
-        自分のOWN_IDが0003なら、
-        このREPLYは自分宛てと判断する。
-
-        goal_bstはREPLYの方向判断用として残す。
         """
 
 
         # ========================================================
-        # ★変更2
         # Packet IDからASK生成元ノードIDを取得
         # ========================================================
 
-        # 例:
-        #
-        #   "0003-125"
-        #
-        #        ↓
-        #
-        #   "0003"
-        #
 
         origin_node_id = packet.pkt_id.split(
             "-",
@@ -311,7 +409,6 @@ class Routing:
 
 
         # ========================================================
-        # ★変更2
         # REPLY最終到達判定
         # ========================================================
 
@@ -344,12 +441,85 @@ class Routing:
 
     def _forward(self, packet: Packet) -> None:
         """
-        現在はTTLだけで中継判断する。
+        TTLに加えて位置指向性で中継判断する。
 
-        distanceによる中継制御はまだ行わない。
+        packet.distance:
+            直前の送信ノードからgoalまでの距離[m]
+
+        local_distance:
+            自ノードからgoalまでの距離[m]
+
         """
 
         if not packet.can_forward():
+            return
+
+        # 自ノードからgoalまでの距離
+        local_distance = self._distance_to_bst(
+            packet.goal_bst,
+            packet.goal_bit_len,
+        )
+
+        if local_distance is None:
+
+            print(
+                f"[DIRECTION-DROP] "
+                f"type={packet.msg_type} "
+                f"id={packet.pkt_id} "
+                f"reason=distance_unavailable",
+                flush=True,
+            )
+
+            return
+
+        try:
+            previous_distance = float(packet.distance)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            print(
+                f"[DIRECTION-DROP] "
+                f"type={packet.msg_type} "
+                f"id={packet.pkt_id} "
+                f"reason=invalid_previous_distance",
+                flush=True,
+            )
+
+            return
+
+        if previous_distance <= 0.0:
+
+            print(
+                f"[DIRECTION-DROP] "
+                f"type={packet.msg_type} "
+                f"id={packet.pkt_id} "
+                f"prev={previous_distance:.2f} "
+                f"local={local_distance:.2f} "
+                f"reason=invalid_previous_distance",
+                flush=True,
+            )
+
+            return
+
+        # 最低1mはgoal方向へ前進したノードだけ中継
+        min_progress_m = 1.0
+
+        if (
+            local_distance + min_progress_m
+            >= previous_distance
+        ):
+
+            print(
+                f"[DIRECTION-DROP] "
+                f"type={packet.msg_type} "
+                f"id={packet.pkt_id} "
+                f"prev={previous_distance:.2f} "
+                f"local={local_distance:.2f}",
+                flush=True,
+            )
 
             return
 
@@ -358,14 +528,19 @@ class Routing:
         if forward_packet is None:
             return
 
+        # 次のノードが比較できるように距離を書き換える
+        forward_packet.distance = local_distance
+
         self._send_packet(
             forward_packet
         )
 
         print(
-            f"[MESH-FORWARD] "
+            f"[DIRECTION-FORWARD] "
             f"type={forward_packet.msg_type} "
             f"id={forward_packet.pkt_id} "
+            f"prev={previous_distance:.2f} "
+            f"local={local_distance:.2f} "
             f"ttl={forward_packet.ttl}",
             flush=True,
         )
