@@ -215,18 +215,6 @@ def main():
                 continue
 
 
-            print(
-                f"[MESH-RX-PACKET] "
-                f"type={packet.msg_type} "
-                f"id={packet.pkt_id} "
-                f"goal={packet.goal_bst} "
-                f"start={packet.start_bst} "
-                f"data={packet.data_id} "
-                f"ttl={packet.ttl} "
-                f"distance={packet.distance:.2f}",
-                flush=True,
-            )
-
 
             # ====================================================
             # Routing
