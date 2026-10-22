@@ -394,8 +394,23 @@ class Routing:
     def _handle_reply(self, packet: Packet) -> None:
         """
         REPLY受信処理。
+
+        data_id="POS" は移動ノードの位置通知として扱う。
+        それ以外のREPLYは従来のASK応答として処理する。
         """
 
+        if packet.data_id == "POS":
+            # 現段階は基地局での直接受信のみ。
+            # RELAYでの中継対応は別STEPで行う。
+            if getattr(config, "NODE_ROLE", None) == "BASE":
+                self._save_mobile_position(packet)
+            else:
+                print(
+                    f"[MONITOR-SKIP] role={getattr(config, 'NODE_ROLE', 'UNKNOWN')} "
+                    f"id={packet.pkt_id}",
+                    flush=True,
+                )
+            return
 
         # ========================================================
         # Packet IDからASK生成元ノードIDを取得
@@ -630,4 +645,64 @@ class Routing:
             f"lon={lon}",
             flush=True,
         )
+
+
+
+    # ============================================================
+    # 移動ノードのREPLY位置通知を基地局で保存
+    # ============================================================
+
+    def _save_mobile_position(self, packet: Packet) -> None:
+        """
+        data_id="POS" のREPLYに含まれるstart_bstを位置へ復元し、
+        各基地局のローカルRedisに保存する。
+
+        監視用REPLYのpkt_idは「移動ノードOWN_ID-連番」とする。
+        BST-IDを復元した座標であり、生のGPS座標ではない。
+        """
+        import time
+
+        node_id = packet.pkt_id.split("-", 1)[0]
+        if not node_id or "-" not in packet.pkt_id:
+            print(f"[MONITOR-DROP] invalid pkt_id={packet.pkt_id}", flush=True)
+            return
+
+        try:
+            lon, lat, _, _ = BSTIDDecoder.decode(
+                packet.start_bst,
+                packet.start_bit_len,
+            )
+            if lat is None or lon is None:
+                raise ValueError("decoded coordinates are missing")
+            lat = float(lat)
+            lon = float(lon)
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("decoded coordinates out of range")
+        except (ValueError, TypeError, OverflowError) as e:
+            print(f"[MONITOR-DROP] invalid position id={packet.pkt_id}: {e}", flush=True)
+            return
+        except Exception as e:
+            print(f"[MONITOR-DROP] BST decode failed id={packet.pkt_id}: {e}", flush=True)
+            return
+
+        node_state = {
+            "node_id": node_id,
+            "lat": lat,
+            "lon": lon,
+            "bst_id_int": str(packet.start_bst),
+            "bst_bit_len": packet.start_bit_len,
+            "updated_at": time.time(),
+            "packet_id": packet.pkt_id,
+            "source": "REPLY_POS",
+        }
+        prefix = getattr(config, "REDIS_NODE_PREFIX", "lora:nodes:")
+        key = f"{prefix}{node_id}"
+        self.redis.set(key, json.dumps(node_state))
+
+        print(
+            f"[MONITOR-REPLY] node={node_id} "
+            f"pkt={packet.pkt_id} lat={lat:.8f} lon={lon:.8f}",
+            flush=True,
+        )
+
 
