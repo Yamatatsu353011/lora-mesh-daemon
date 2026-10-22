@@ -615,6 +615,7 @@ class Routing:
             "bst_bit_len": packet.start_bit_len,
         }
 
+        
         key = f"lora:nodes:{node_id}"
 
         self.redis.set(
@@ -629,3 +630,4 @@ class Routing:
             f"lon={lon}",
             flush=True,
         )
+
