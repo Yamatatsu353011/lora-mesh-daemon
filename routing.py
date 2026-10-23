@@ -697,12 +697,18 @@ class Routing:
         }
         prefix = getattr(config, "REDIS_NODE_PREFIX", "lora:nodes:")
         key = f"{prefix}{node_id}"
+        # Count only unique monitoring packets. handle_packet() has already
+        # rejected duplicates using (msg_type, pkt_id).
+        count_key = f"lora:monitor:rx_count:{node_id}"
+        rx_count = self.redis.incr(count_key)
+        node_state["rx_count"] = rx_count
+
+        # Preserve the existing key used by the map/web integration.
         self.redis.set(key, json.dumps(node_state))
 
         print(
             f"[MONITOR-REPLY] node={node_id} "
-            f"pkt={packet.pkt_id} lat={lat:.8f} lon={lon:.8f}",
+            f"pkt={packet.pkt_id} lat={lat:.8f} lon={lon:.8f} "
+            f"rx_count={rx_count}",
             flush=True,
         )
-
-
