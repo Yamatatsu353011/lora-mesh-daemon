@@ -400,14 +400,20 @@ class Routing:
         """
 
         if packet.data_id == "POS":
-            # 現段階は基地局での直接受信のみ。
-            # RELAYでの中継対応は別STEPで行う。
-            if getattr(config, "NODE_ROLE", None) == "BASE":
+            role = getattr(config, "NODE_ROLE", None)
+
+            if role == "BASE":
+                # 基地局は位置を保存するが再送信しない。
                 self._save_mobile_position(packet)
+
+            elif role == "RELAY":
+                # 監視用POSには宛先BST・距離がないため、
+                # 通常REPLYの指向性転送ではなくTTL限定で転送する。
+                self._forward_monitor_position(packet)
+
             else:
                 print(
-                    f"[MONITOR-SKIP] role={getattr(config, 'NODE_ROLE', 'UNKNOWN')} "
-                    f"id={packet.pkt_id}",
+                    f"[MONITOR-SKIP] role={role} id={packet.pkt_id}",
                     flush=True,
                 )
             return
@@ -448,6 +454,45 @@ class Routing:
         # --------------------------------------------------------
 
         self._forward(packet)
+
+
+    # ============================================================
+    # 監視用POSの中継（RELAYのみ）
+    # ============================================================
+
+    def _forward_monitor_position(self, packet: Packet) -> None:
+        """
+        POSパケットをTTL限定で中継する。
+        重複排除はhandle_packet()で既に実施されている。
+        pkt_id・start_bstは変更せず、TTLだけ1減らす。
+        """
+        if not packet.can_forward():
+            print(
+                f"[MONITOR-NO-FORWARD] id={packet.pkt_id} "
+                f"ttl={packet.ttl}",
+                flush=True,
+            )
+            return
+
+        forward_packet = packet.forwarded()
+        if forward_packet is None:
+            return
+
+        try:
+            self._send_packet(forward_packet)
+        except Exception as e:
+            print(
+                f"[MONITOR-FORWARD-ERR] id={packet.pkt_id} error={e}",
+                flush=True,
+            )
+            return
+
+        print(
+            f"[MONITOR-FORWARD] id={forward_packet.pkt_id} "
+            f"ttl={packet.ttl}->{forward_packet.ttl} "
+            f"start_bst={forward_packet.start_bst}",
+            flush=True,
+        )
 
 
     # ============================================================
