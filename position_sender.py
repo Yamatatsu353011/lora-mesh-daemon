@@ -11,7 +11,7 @@ import config
 from bst_id.encoder import BSTIDEncoder
 from packet import make_reply_packet
 
-SEND_INTERVAL_SEC = 5.0
+SEND_INTERVAL_SEC = 3.0
 GPS_MAX_AGE_SEC = 15.0
 MONITOR_DATA_ID = "POS"
 
