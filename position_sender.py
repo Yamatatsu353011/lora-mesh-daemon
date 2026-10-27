@@ -67,7 +67,7 @@ def make_position_reply(r, sequence):
         start_bst=bst_id,
         start_bit_len=bit_len,
         data_id=MONITOR_DATA_ID,
-        ttl=0,
+        ttl=10,
         distance=0.0,
     )
 
