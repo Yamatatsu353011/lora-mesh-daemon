@@ -2,6 +2,8 @@
 
 import json
 import math
+import re
+import time
 
 import redis
 
@@ -232,7 +234,11 @@ class Routing:
 
         if packet.msg_type == "ASK":
 
-            self._handle_ask(packet)
+            # Web発注ASK (O01:10など) は通常ASKと分離する。
+            if isinstance(packet.data_id, str) and packet.data_id.startswith("O"):
+                self._handle_order_ask(packet)
+            else:
+                self._handle_ask(packet)
             return
 
         if packet.msg_type == "REPLY":
@@ -244,6 +250,87 @@ class Routing:
             f"[MESH-DROP] unknown type={packet.msg_type}",
             flush=True,
         )
+
+
+    # ============================================================
+    # Web発注ASK (Oxx:qty)
+    # ============================================================
+
+    def _handle_order_ask(self, packet: Packet) -> None:
+        """Web発注ASKを受信・転送する。
+
+        BASE: 自局発のエコーを除き、受信した発注をローカルRedisに記録する。
+        RELAY: 既存のTTL・位置指向性で転送する。
+        MOBILE: 発注を処理せず転送もしない。
+
+        注: 目標BST-IDは発注対象地域を表し、発注を受け付ける基地局の
+        位置条件には使用しない。発注の配送先基地局IDは現行ASKにない。
+        """
+        match = re.fullmatch(r"O(\d{2}):([1-9]\d*)", packet.data_id)
+        if not match:
+            print(f"[ORDER-DROP] invalid_data_id={packet.data_id!r} "
+                  f"pkt={packet.pkt_id}", flush=True)
+            return
+
+        item_no = int(match.group(1))
+        qty = int(match.group(2))
+        if not (1 <= item_no <= 17 and 1 <= qty <= 999999):
+            print(f"[ORDER-DROP] invalid item/qty pkt={packet.pkt_id} "
+                  f"item_no={item_no} qty={qty}", flush=True)
+            return
+
+        role = getattr(config, "NODE_ROLE", None)
+        origin_id = packet.pkt_id.split("-", 1)[0]
+        if "-" not in packet.pkt_id or not origin_id:
+            print(f"[ORDER-DROP] invalid pkt_id={packet.pkt_id!r}", flush=True)
+            return
+
+        if role == "BASE":
+            if origin_id == str(config.OWN_ID):
+                print(f"[ORDER-OWN-SKIP] pkt={packet.pkt_id}", flush=True)
+                return
+
+            # 物資番号は送信側ask_sender.pyの ITEM_CODES の順番と共通。
+            item_codes = (
+                "water", "hardtack", "rice_meal", "other_food", "supplement",
+                "cold_medicine", "painkiller", "stomach_medicine", "eye_drops",
+                "bandage", "compress", "blanket", "mat", "cushion",
+                "portable_toilet", "battery", "light",
+            )
+            record = {
+                "pkt_id": packet.pkt_id,
+                "origin_node": origin_id,
+                "received_by": str(config.OWN_ID),
+                "item_code": item_codes[item_no - 1],
+                "item_no": item_no,
+                "requested_qty": qty,
+                "goal_bst": str(packet.goal_bst),
+                "goal_bit_len": packet.goal_bit_len,
+                "start_bst": str(packet.start_bst),
+                "start_bit_len": packet.start_bit_len,
+                "received_at": time.time(),
+                "source": "LORA_ORDER_ASK",
+            }
+            # raw受信イベントと別の、Web連携用の受信記録。
+            # handle_packetの重複排除により基本的に同一pkt_idは1回だけ保存。
+            key = f"lora:orders:received:{origin_id}:{packet.pkt_id}"
+            serialized = json.dumps(record, ensure_ascii=False)
+            self.redis.set(key, serialized)
+            self.redis.lpush("lora:orders:received", serialized)
+            self.redis.ltrim("lora:orders:received", 0, 999)
+            self.redis.publish("event:business:order_received", serialized)
+            print(f"[ORDER-RECEIVED] pkt={packet.pkt_id} "
+                  f"from={origin_id} item={record['item_code']} qty={qty} "
+                  f"base={config.OWN_ID}", flush=True)
+            return
+
+        if role == "RELAY":
+            print(f"[ORDER-RELAY-CHECK] pkt={packet.pkt_id} ttl={packet.ttl}",
+                  flush=True)
+            self._forward(packet)
+            return
+
+        print(f"[ORDER-SKIP] role={role} pkt={packet.pkt_id}", flush=True)
 
 
     # ============================================================
