@@ -59,6 +59,9 @@ def main():
     radio.open()
     radio.configure_from_config()
 
+    # 通常運用時は短いタイムアウトを使用
+    radio.ser.timeout = 0.01
+
     print(
         "[RAW-DAEMON] started",
         flush=True
