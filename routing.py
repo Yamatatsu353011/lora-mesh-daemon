@@ -486,6 +486,10 @@ class Routing:
         それ以外のREPLYは従来のASK応答として処理する。
         """
 
+        if isinstance(packet.data_id, str) and re.match(r"^P\d{2}:", packet.data_id):
+            self._handle_order_reply(packet)
+            return
+
         if packet.data_id == "POS":
             role = getattr(config, "NODE_ROLE", None)
 
@@ -541,6 +545,61 @@ class Routing:
         # --------------------------------------------------------
 
         self._forward(packet)
+
+
+    # ============================================================
+    # LoRa business-order REPLY (Pxx:qty:responder36)
+    # ============================================================
+
+    def _handle_order_reply(self, packet: Packet) -> None:
+        match = re.fullmatch(r"P(\d{2}):(\d+):([0-9A-Z]+)", packet.data_id)
+        if not match:
+            print(f"[ORDER-REPLY-DROP] invalid data={packet.data_id!r}", flush=True)
+            return
+        item_no = int(match.group(1))
+        qty = int(match.group(2))
+        if not 1 <= item_no <= 17 or not 0 <= qty <= 9999:
+            print(f"[ORDER-REPLY-DROP] invalid item/qty id={packet.pkt_id}", flush=True)
+            return
+        origin = packet.pkt_id.split("-", 1)[0]
+        role = getattr(config, "NODE_ROLE", None)
+        if role == "RELAY":
+            self._forward(packet)
+            return
+        if role != "BASE" or origin != str(config.OWN_ID):
+            print(f"[ORDER-REPLY-SKIP] role={role} origin={origin}", flush=True)
+            return
+        original_raw = self.redis.get(f"lora:orders:outgoing:{packet.pkt_id}")
+        if not original_raw:
+            print(f"[ORDER-REPLY-DROP] mapping missing ask={packet.pkt_id}", flush=True)
+            return
+        original = json.loads(original_raw)
+        if int(original.get("item_no", -1)) != item_no:
+            print(f"[ORDER-REPLY-DROP] item mismatch ask={packet.pkt_id}", flush=True)
+            return
+        if qty > int(original.get("requested_qty", -1)):
+            print(f"[ORDER-REPLY-DROP] qty too large ask={packet.pkt_id}", flush=True)
+            return
+        responder_num = int(match.group(3), 36)
+        responder = str(responder_num).zfill(len(str(config.OWN_ID)))
+        record = {
+            "source": "LORA_ORDER_REPLY", "ask_pkt_id": packet.pkt_id,
+            "order_id": original["order_id"],
+            "item_code": original["item_code"],
+            "requested_qty": int(original["requested_qty"]),
+            "accepted_qty": qty, "responder_node": responder,
+            "received_at": time.time(),
+        }
+        serialized = json.dumps(record, ensure_ascii=False)
+        key = f"lora:orders:reply_received:{packet.pkt_id}"
+        if not self.redis.set(key, serialized, nx=True):
+            print(f"[ORDER-REPLY-DUP] ask={packet.pkt_id}", flush=True)
+            return
+        self.redis.lpush("lora:orders:replies", serialized)
+        self.redis.ltrim("lora:orders:replies", 0, 999)
+        print(f"[ORDER-REPLY-RECEIVED] ask={packet.pkt_id} "
+              f"item={record['item_code']} accepted={qty} "
+              f"responder={responder}", flush=True)
 
 
     # ============================================================
