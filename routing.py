@@ -290,6 +290,9 @@ class Routing:
                 print(f"[ORDER-OWN-SKIP] pkt={packet.pkt_id}", flush=True)
                 return
 
+            # 発注元のBST-IDから位置を復元し、既存の地図表示用Redisへ保存する。
+            self._save_sender_position(packet)
+
             # 物資番号は送信側ask_sender.pyの ITEM_CODES の順番と共通。
             item_codes = (
                 "water", "hardtack", "rice_meal", "other_food", "supplement",
