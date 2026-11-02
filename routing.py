@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 
 import json
@@ -17,6 +18,27 @@ from mesh import DuplicateSuppressor
 from packet import Packet, make_reply_packet
 
 
+ITEM_CODES = (
+    "water",
+    "hardtack",
+    "rice_meal",
+    "other_food",
+    "supplement",
+    "cold_medicine",
+    "painkiller",
+    "stomach_medicine",
+    "eye_drops",
+    "bandage",
+    "compress",
+    "blanket",
+    "mat",
+    "cushion",
+    "portable_toilet",
+    "battery",
+    "light",
+)
+
+
 class Routing:
 
     def __init__(self, redis_client: redis.Redis):
@@ -27,24 +49,72 @@ class Routing:
             retention_sec=180.0
         )
 
+    # ============================================================
+    # Duplicate Suppression
+    # ============================================================
+
+    @staticmethod
+    def _duplicate_type(packet: Packet):
+        """
+        同じASK IDを使うREPLYを区別する。
+
+        ASK             -> ASK
+        REPLY P01:2:2   -> REPLY:P
+        REPLY C01:2:1   -> REPLY:C
+        REPLY POS       -> REPLY:POS
+        通常REPLY       -> REPLY
+
+        DuplicateSuppressor自体の変更は不要。
+        """
+
+        if packet.msg_type != "REPLY":
+            return packet.msg_type
+
+        data_id = packet.data_id
+
+        if data_id == "POS":
+            return "REPLY:POS"
+
+        if isinstance(data_id, str):
+
+            if re.fullmatch(
+                r"P\d{2}:\d+:[0-9A-Z]+",
+                data_id,
+            ):
+                return "REPLY:P"
+
+            if re.fullmatch(
+                r"C\d{2}:\d+:[0-9A-Z]+",
+                data_id,
+            ):
+                return "REPLY:C"
+
+        return "REPLY"
+
+    def _is_duplicate(self, packet: Packet):
+
+        duplicate_type = self._duplicate_type(
+            packet
+        )
+
+        return self.duplicate_suppressor.is_duplicate(
+            duplicate_type,
+            packet.pkt_id,
+        )
 
     # ============================================================
-    # 自ノードの現在BST-ID取得
+    # Local BST-ID
     # ============================================================
 
     def _get_local_bst(self):
         """
-        Redis state:self の lat/lon から
-        自ノードのBST-IDを生成する。
-
-        高度・時刻は使用しない。
+        Redisから自ノードの位置情報を取得し、
+        BST-IDへ変換する。
         """
 
-        raw = self.redis.get(
-            config.REDIS_GPS_STATE_KEY
-        )
+        position = self._get_local_position()
 
-        if not raw:
+        if position is None:
 
             print(
                 "[GPS] local position unavailable",
@@ -53,49 +123,58 @@ class Routing:
 
             return None
 
-        try:
+        lat, lon = position
 
-            state = json.loads(raw)
+        zx = getattr(
+            config,
+            "BST_ZOOM_X",
+            getattr(config, "BST_ZX", None),
+        )
 
-            lat = float(state["lat"])
-            lon = float(state["lon"])
+        zy = getattr(
+            config,
+            "BST_ZOOM_Y",
+            getattr(config, "BST_ZY", None),
+        )
 
-        except (
-            ValueError,
-            TypeError,
-            KeyError,
-            json.JSONDecodeError,
-        ):
+        if zx is None or zy is None:
 
             print(
-                f"[GPS] invalid state: {raw}",
+                "[GPS] BST zoom unavailable",
                 flush=True,
             )
 
             return None
 
-        bst_id, bit_len = BSTIDEncoder.encode(
-            lon,
-            lat,
-            None,
-            None,
-            config.BST_ZOOM_X,
-            config.BST_ZOOM_Y,
-            0,
-            0,
-        )
+        try:
 
-        return bst_id, bit_len
+            bst_id, bit_len = BSTIDEncoder.encode(
+                lon,
+                lat,
+                None,
+                None,
+                int(zx),
+                int(zy),
+                0,
+                0,
+            )
 
+            return bst_id, bit_len
+
+        except Exception as exc:
+
+            print(
+                f"[GPS] BST encode failed: {exc}",
+                flush=True,
+            )
+
+            return None
 
     # ============================================================
-    # 自ノードの現在緯度経度取得
+    # Local Position
     # ============================================================
 
     def _get_local_position(self):
-        """
-        Redis state:self から自ノードの lat/lon を取得する。
-        """
 
         raw = self.redis.get(
             config.REDIS_GPS_STATE_KEY
@@ -105,9 +184,19 @@ class Routing:
             return None
 
         try:
+
             state = json.loads(raw)
+
             lat = float(state["lat"])
             lon = float(state["lon"])
+
+            if not (
+                -90 <= lat <= 90
+                and -180 <= lon <= 180
+            ):
+                return None
+
+            return lat, lon
 
         except (
             ValueError,
@@ -117,31 +206,41 @@ class Routing:
         ):
             return None
 
-        return lat, lon
-
-
     # ============================================================
-    # 2点間距離
+    # Haversine Distance
     # ============================================================
 
     @staticmethod
-    def _haversine_distance_m(lat1, lon1, lat2, lon2):
-        """
-        緯度経度2点間の距離[m]をHaversine式で求める。
-        """
+    def _haversine_distance_m(
+        lat1,
+        lon1,
+        lat2,
+        lon2,
+    ):
 
         earth_radius_m = 6371000.0
 
         phi1 = math.radians(lat1)
         phi2 = math.radians(lat2)
-        d_phi = math.radians(lat2 - lat1)
-        d_lambda = math.radians(lon2 - lon1)
+
+        d_phi = math.radians(
+            lat2 - lat1
+        )
+
+        d_lambda = math.radians(
+            lon2 - lon1
+        )
 
         a = (
             math.sin(d_phi / 2.0) ** 2
             + math.cos(phi1)
             * math.cos(phi2)
             * math.sin(d_lambda / 2.0) ** 2
+        )
+
+        a = max(
+            0.0,
+            min(1.0, a),
         )
 
         c = 2.0 * math.atan2(
@@ -151,34 +250,43 @@ class Routing:
 
         return earth_radius_m * c
 
-
     # ============================================================
-    # 自ノード -> 指定BST-ID の距離
+    # Distance To BST-ID
     # ============================================================
 
-    def _distance_to_bst(self, goal_bst, goal_bit_len):
-        """
-        自ノードの現在位置から指定BST-IDまでの距離[m]を返す。
-        計算できない場合はNone。
-        """
+    def _distance_to_bst(
+        self,
+        goal_bst,
+        goal_bit_len,
+    ):
 
-        local_position = self._get_local_position()
+        local_position = (
+            self._get_local_position()
+        )
 
         if local_position is None:
             return None
 
-        local_lat, local_lon = local_position
+        local_lat, local_lon = (
+            local_position
+        )
 
         try:
-            goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(
-                goal_bst,
-                goal_bit_len,
+
+            goal_lon, goal_lat, _, _ = (
+                BSTIDDecoder.decode(
+                    goal_bst,
+                    goal_bit_len,
+                )
             )
 
         except Exception:
             return None
 
-        if goal_lat is None or goal_lon is None:
+        if (
+            goal_lat is None
+            or goal_lon is None
+        ):
             return None
 
         return self._haversine_distance_m(
@@ -188,172 +296,285 @@ class Routing:
             goal_lon,
         )
 
-
     # ============================================================
     # Redis TX
     # ============================================================
 
-    def _send_packet(self, packet: Packet) -> None:
-        """
-        Packet
-          ↓ encode()
-        bytes
-          ↓ hex()
-        Redis RAW_TX
-        """
+    def _send_packet(
+        self,
+        packet: Packet,
+    ) -> None:
 
         payload = packet.encode()
-        payload_hex = payload.hex()
 
         self.redis.lpush(
             config.REDIS_RAW_TX,
-            payload_hex,
+            payload.hex(),
         )
 
-
     # ============================================================
-    # Packet受信
+    # Packet RX
     # ============================================================
 
-    def handle_packet(self, packet: Packet) -> None:
-        """
-        受信したASK/REPLYパケットを処理する。
-        """
+    def handle_packet(
+        self,
+        packet: Packet,
+    ) -> None:
 
         # --------------------------------------------------------
         # Duplicate Suppression
         # --------------------------------------------------------
 
-        if self.duplicate_suppressor.is_duplicate(
-            packet.msg_type,
-            packet.pkt_id,
-        ):
+        if self._is_duplicate(packet):
+
+            print(
+                f"[MESH-DUP] "
+                f"type={packet.msg_type} "
+                f"data={packet.data_id} "
+                f"id={packet.pkt_id}",
+                flush=True,
+            )
 
             return
 
+        # --------------------------------------------------------
+        # ASK
+        # --------------------------------------------------------
 
         if packet.msg_type == "ASK":
 
-            # Web発注ASK (O01:10など) は通常ASKと分離する。
-            if isinstance(packet.data_id, str) and packet.data_id.startswith("O"):
-                self._handle_order_ask(packet)
+            if (
+                isinstance(packet.data_id, str)
+                and packet.data_id.startswith("O")
+            ):
+
+                self._handle_order_ask(
+                    packet
+                )
+
             else:
-                self._handle_ask(packet)
+
+                self._handle_ask(
+                    packet
+                )
+
             return
+
+        # --------------------------------------------------------
+        # REPLY
+        # --------------------------------------------------------
 
         if packet.msg_type == "REPLY":
 
-            self._handle_reply(packet)
+            self._handle_reply(
+                packet
+            )
+
             return
 
         print(
-            f"[MESH-DROP] unknown type={packet.msg_type}",
+            f"[MESH-DROP] "
+            f"unknown type={packet.msg_type}",
             flush=True,
         )
 
-
     # ============================================================
-    # Web発注ASK (Oxx:qty)
+    # Web Order ASK
     # ============================================================
 
-    def _handle_order_ask(self, packet: Packet) -> None:
-        """Web発注ASKを受信・転送する。
+    def _handle_order_ask(
+        self,
+        packet: Packet,
+    ) -> None:
 
-        BASE: 自局発のエコーを除き、受信した発注をローカルRedisに記録する。
-        RELAY: 既存のTTL・位置指向性で転送する。
-        MOBILE: 発注を処理せず転送もしない。
+        match = re.fullmatch(
+            r"O(\d{2}):([1-9]\d*)",
+            packet.data_id,
+        )
 
-        注: 目標BST-IDは発注対象地域を表し、発注を受け付ける基地局の
-        位置条件には使用しない。発注の配送先基地局IDは現行ASKにない。
-        """
-        match = re.fullmatch(r"O(\d{2}):([1-9]\d*)", packet.data_id)
         if not match:
-            print(f"[ORDER-DROP] invalid_data_id={packet.data_id!r} "
-                  f"pkt={packet.pkt_id}", flush=True)
+
+            print(
+                f"[ORDER-DROP] "
+                f"invalid data={packet.data_id!r}",
+                flush=True,
+            )
+
             return
 
-        item_no = int(match.group(1))
-        qty = int(match.group(2))
-        if not (1 <= item_no <= 17 and 1 <= qty <= 999999):
-            print(f"[ORDER-DROP] invalid item/qty pkt={packet.pkt_id} "
-                  f"item_no={item_no} qty={qty}", flush=True)
+        item_no = int(
+            match.group(1)
+        )
+
+        qty = int(
+            match.group(2)
+        )
+
+        if not (
+            1 <= item_no <= len(ITEM_CODES)
+            and 1 <= qty <= 9999
+        ):
+
+            print(
+                f"[ORDER-DROP] "
+                f"invalid item/qty "
+                f"id={packet.pkt_id}",
+                flush=True,
+            )
+
             return
 
-        role = getattr(config, "NODE_ROLE", None)
-        origin_id = packet.pkt_id.split("-", 1)[0]
-        if "-" not in packet.pkt_id or not origin_id:
-            print(f"[ORDER-DROP] invalid pkt_id={packet.pkt_id!r}", flush=True)
+        if "-" not in packet.pkt_id:
+
+            print(
+                f"[ORDER-DROP] "
+                f"invalid pkt_id={packet.pkt_id!r}",
+                flush=True,
+            )
+
             return
+
+        origin_id = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
+
+        role = getattr(
+            config,
+            "NODE_ROLE",
+            None,
+        )
+
+        # --------------------------------------------------------
+        # BASE
+        # --------------------------------------------------------
 
         if role == "BASE":
-            if origin_id == str(config.OWN_ID):
-                print(f"[ORDER-OWN-SKIP] pkt={packet.pkt_id}", flush=True)
+
+            if origin_id == str(
+                config.OWN_ID
+            ):
+
+                print(
+                    f"[ORDER-OWN-SKIP] "
+                    f"pkt={packet.pkt_id}",
+                    flush=True,
+                )
+
                 return
 
-            # 発注元のBST-IDから位置を復元し、既存の地図表示用Redisへ保存する。
-            self._save_sender_position(packet)
-
-            # 物資番号は送信側ask_sender.pyの ITEM_CODES の順番と共通。
-            item_codes = (
-                "water", "hardtack", "rice_meal", "other_food", "supplement",
-                "cold_medicine", "painkiller", "stomach_medicine", "eye_drops",
-                "bandage", "compress", "blanket", "mat", "cushion",
-                "portable_toilet", "battery", "light",
+            self._save_sender_position(
+                packet
             )
+
             record = {
                 "pkt_id": packet.pkt_id,
                 "origin_node": origin_id,
-                "received_by": str(config.OWN_ID),
-                "item_code": item_codes[item_no - 1],
+                "received_by": str(
+                    config.OWN_ID
+                ),
+                "item_code": ITEM_CODES[
+                    item_no - 1
+                ],
                 "item_no": item_no,
                 "requested_qty": qty,
-                "goal_bst": str(packet.goal_bst),
-                "goal_bit_len": packet.goal_bit_len,
-                "start_bst": str(packet.start_bst),
-                "start_bit_len": packet.start_bit_len,
+                "goal_bst": str(
+                    packet.goal_bst
+                ),
+                "goal_bit_len": (
+                    packet.goal_bit_len
+                ),
+                "start_bst": str(
+                    packet.start_bst
+                ),
+                "start_bit_len": (
+                    packet.start_bit_len
+                ),
                 "received_at": time.time(),
                 "source": "LORA_ORDER_ASK",
             }
-            # raw受信イベントと別の、Web連携用の受信記録。
-            # handle_packetの重複排除により基本的に同一pkt_idは1回だけ保存。
-            key = f"lora:orders:received:{origin_id}:{packet.pkt_id}"
-            serialized = json.dumps(record, ensure_ascii=False)
-            self.redis.set(key, serialized)
-            self.redis.lpush("lora:orders:received", serialized)
-            self.redis.ltrim("lora:orders:received", 0, 999)
-            self.redis.publish("event:business:order_received", serialized)
-            print(f"[ORDER-RECEIVED] pkt={packet.pkt_id} "
-                  f"from={origin_id} item={record['item_code']} qty={qty} "
-                  f"base={config.OWN_ID}", flush=True)
+
+            key = (
+                "lora:orders:received:"
+                f"{origin_id}:{packet.pkt_id}"
+            )
+
+            serialized = json.dumps(
+                record,
+                ensure_ascii=False,
+            )
+
+            self.redis.set(
+                key,
+                serialized,
+            )
+
+            self.redis.lpush(
+                "lora:orders:received",
+                serialized,
+            )
+
+            self.redis.ltrim(
+                "lora:orders:received",
+                0,
+                999,
+            )
+
+            self.redis.publish(
+                "event:business:order_received",
+                serialized,
+            )
+
+            print(
+                f"[ORDER-RECEIVED] "
+                f"pkt={packet.pkt_id} "
+                f"from={origin_id} "
+                f"item={record['item_code']} "
+                f"qty={qty} "
+                f"base={config.OWN_ID}",
+                flush=True,
+            )
+
             return
+
+        # --------------------------------------------------------
+        # RELAY
+        # --------------------------------------------------------
 
         if role == "RELAY":
-            print(f"[ORDER-RELAY-CHECK] pkt={packet.pkt_id} ttl={packet.ttl}",
-                  flush=True)
-            self._forward(packet)
+
+            print(
+                f"[ORDER-RELAY-CHECK] "
+                f"pkt={packet.pkt_id} "
+                f"ttl={packet.ttl}",
+                flush=True,
+            )
+
+            self._forward(
+                packet
+            )
+
             return
 
-        print(f"[ORDER-SKIP] role={role} pkt={packet.pkt_id}", flush=True)
-
+        print(
+            f"[ORDER-SKIP] "
+            f"role={role} "
+            f"pkt={packet.pkt_id}",
+            flush=True,
+        )
 
     # ============================================================
-    # ASK
+    # Normal ASK
     # ============================================================
 
-    def _handle_ask(self, packet: Packet) -> None:
-        """
-        ASK受信処理。
+    def _handle_ask(
+        self,
+        packet: Packet,
+    ) -> None:
 
-        ・自分が目標BST-IDのエリア
-        ・data_idを持っている
-
-        の両方を満たせばREPLY。
-
-        ★変更:
-        REPLYを生成した場合、そのASKはそれ以上中継しない。
-        """
-
-        self._save_sender_position(packet)
+        self._save_sender_position(
+            packet
+        )
 
         local = self._get_local_bst()
 
@@ -361,7 +582,9 @@ class Routing:
 
         if local is not None:
 
-            local_bst, local_bit_len = local
+            local_bst, local_bit_len = (
+                local
+            )
 
             is_target_area = is_match(
                 packet.goal_bst,
@@ -374,7 +597,7 @@ class Routing:
         )
 
         # --------------------------------------------------------
-        # 目標エリア ＋ データあり
+        # Target node
         # --------------------------------------------------------
 
         if (
@@ -383,25 +606,22 @@ class Routing:
             and local is not None
         ):
 
-            local_bst, local_bit_len = local
+            local_bst, local_bit_len = (
+                local
+            )
 
             print(
                 f"[ASK-DATA-FOUND] "
                 f"id={packet.pkt_id} "
-                f"goal={packet.goal_bst} "
-                f"data={packet.data_id} "
-                f"ask_start={packet.start_bst}",
+                f"data={packet.data_id}",
                 flush=True,
             )
 
-
-            # ----------------------------------------------------
-            # REPLY生成ノード -> ASK生成元位置 の距離
-            # ----------------------------------------------------
-
-            reply_distance = self._distance_to_bst(
-                packet.start_bst,
-                packet.start_bit_len,
+            reply_distance = (
+                self._distance_to_bst(
+                    packet.start_bst,
+                    packet.start_bit_len,
+                )
             )
 
             if reply_distance is None:
@@ -416,41 +636,23 @@ class Routing:
 
                 return
 
-
-            # ----------------------------------------------------
-            # REPLY生成
-            # ----------------------------------------------------
-
-            reply_packet = make_reply_packet(
-                pkt_id=packet.pkt_id,
-
-                goal_bst=packet.start_bst,
-                goal_bit_len=packet.start_bit_len,
-
-                # REPLY生成ノードの現在位置
-                start_bst=local_bst,
-                start_bit_len=local_bit_len,
-
-                data_id=packet.data_id,
-
-                # REPLY生成地点からgoalまでの初期距離
-                distance=reply_distance,
+            reply_packet = (
+                make_reply_packet(
+                    pkt_id=packet.pkt_id,
+                    goal_bst=packet.start_bst,
+                    goal_bit_len=(
+                        packet.start_bit_len
+                    ),
+                    start_bst=local_bst,
+                    start_bit_len=local_bit_len,
+                    data_id=packet.data_id,
+                    distance=reply_distance,
+                )
             )
-
-
-            # ----------------------------------------------------
-            # 自分自身が生成したREPLYを
-            # Duplicate Suppressionへ登録
-            # ----------------------------------------------------
 
             self.mark_sent(
                 reply_packet
             )
-
-
-            # ----------------------------------------------------
-            # REPLY送信キューへ
-            # ----------------------------------------------------
 
             self._send_packet(
                 reply_packet
@@ -459,214 +661,773 @@ class Routing:
             print(
                 f"[REPLY-SEND] "
                 f"id={reply_packet.pkt_id} "
-                f"goal={reply_packet.goal_bst} "
-                f"start={reply_packet.start_bst} "
-                f"data={reply_packet.data_id} "
-                f"ttl={reply_packet.ttl} "
-                f"distance={reply_packet.distance:.2f}",
+                f"data={reply_packet.data_id}",
                 flush=True,
             )
 
             return
 
-
-        # --------------------------------------------------------
-        # 目標条件を満たさなかったASKだけ中継
-        # --------------------------------------------------------
-
-        self._forward(packet)
-
+        self._forward(
+            packet
+        )
 
     # ============================================================
     # REPLY
     # ============================================================
 
-    def _handle_reply(self, packet: Packet) -> None:
-        """
-        REPLY受信処理。
+    def _handle_reply(
+        self,
+        packet: Packet,
+    ) -> None:
 
-        data_id="POS" は移動ノードの位置通知として扱う。
-        それ以外のREPLYは従来のASK応答として処理する。
-        """
+        data_id = packet.data_id
 
-        if isinstance(packet.data_id, str) and re.match(r"^P\d{2}:", packet.data_id):
-            self._handle_order_reply(packet)
+        # --------------------------------------------------------
+        # REPLY(P): 提供可能数
+        # --------------------------------------------------------
+
+        if (
+            isinstance(data_id, str)
+            and data_id.startswith("P")
+            and re.fullmatch(
+                r"P\d{2}:\d+:[0-9A-Z]+",
+                data_id,
+            )
+        ):
+
+            self._handle_order_reply(
+                packet
+            )
+
             return
 
-        if packet.data_id == "POS":
-            role = getattr(config, "NODE_ROLE", None)
+        # --------------------------------------------------------
+        # NEW: REPLY(C): 受領確認
+        # --------------------------------------------------------
+
+        if (
+            isinstance(data_id, str)
+            and data_id.startswith("C")
+            and re.fullmatch(
+                r"C\d{2}:\d+:[0-9A-Z]+",
+                data_id,
+            )
+        ):
+
+            self._handle_order_receipt(
+                packet
+            )
+
+            return
+
+        # --------------------------------------------------------
+        # REPLY(POS): 位置通知
+        # --------------------------------------------------------
+
+        if data_id == "POS":
+
+            role = getattr(
+                config,
+                "NODE_ROLE",
+                None,
+            )
 
             if role == "BASE":
-                # 基地局は位置を保存するが再送信しない。
-                self._save_mobile_position(packet)
+
+                self._save_mobile_position(
+                    packet
+                )
 
             elif role == "RELAY":
-                # 監視用POSには宛先BST・距離がないため、
-                # 通常REPLYの指向性転送ではなくTTL限定で転送する。
-                self._forward_monitor_position(packet)
+
+                self._forward_monitor_position(
+                    packet
+                )
 
             else:
+
                 print(
-                    f"[MONITOR-SKIP] role={role} id={packet.pkt_id}",
+                    f"[MONITOR-SKIP] "
+                    f"role={role} "
+                    f"id={packet.pkt_id}",
                     flush=True,
                 )
+
             return
 
-        # ========================================================
-        # Packet IDからASK生成元ノードIDを取得
-        # ========================================================
+        # --------------------------------------------------------
+        # Normal REPLY
+        # --------------------------------------------------------
 
+        origin_node_id = (
+            packet.pkt_id.split(
+                "-",
+                1,
+            )[0]
+        )
 
-        origin_node_id = packet.pkt_id.split(
-            "-",
-            1,
-        )[0]
-
-
-        # ========================================================
-        # REPLY最終到達判定
-        # ========================================================
-
-        if origin_node_id == str(config.OWN_ID):
+        if origin_node_id == str(
+            config.OWN_ID
+        ):
 
             print(
                 f"[REPLY-ARRIVED] "
                 f"id={packet.pkt_id} "
-                f"origin={origin_node_id} "
-                f"goal={packet.goal_bst} "
-                f"data={packet.data_id} "
-                f"reply_start={packet.start_bst}",
+                f"data={packet.data_id}",
                 flush=True,
             )
 
             return
 
-
-        # --------------------------------------------------------
-        # 自分宛てではないREPLY
-        # → 中継
-        # --------------------------------------------------------
-
-        self._forward(packet)
-
+        self._forward(
+            packet
+        )
 
     # ============================================================
-    # LoRa business-order REPLY (Pxx:qty:responder36)
+    # REPLY(P): Business Order Response
     # ============================================================
 
-    def _handle_order_reply(self, packet: Packet) -> None:
-        match = re.fullmatch(r"P(\d{2}):(\d+):([0-9A-Z]+)", packet.data_id)
+    def _handle_order_reply(
+        self,
+        packet: Packet,
+    ) -> None:
+
+        match = re.fullmatch(
+            r"P(\d{2}):(\d+):([0-9A-Z]+)",
+            packet.data_id,
+        )
+
         if not match:
-            print(f"[ORDER-REPLY-DROP] invalid data={packet.data_id!r}", flush=True)
+
+            print(
+                f"[ORDER-REPLY-DROP] "
+                f"invalid data={packet.data_id!r}",
+                flush=True,
+            )
+
             return
-        item_no = int(match.group(1))
-        qty = int(match.group(2))
-        if not 1 <= item_no <= 17 or not 0 <= qty <= 9999:
-            print(f"[ORDER-REPLY-DROP] invalid item/qty id={packet.pkt_id}", flush=True)
+
+        item_no = int(
+            match.group(1)
+        )
+
+        qty = int(
+            match.group(2)
+        )
+
+        if not (
+            1 <= item_no <= len(ITEM_CODES)
+            and 0 <= qty <= 9999
+        ):
+
+            print(
+                f"[ORDER-REPLY-DROP] "
+                f"invalid item/qty "
+                f"id={packet.pkt_id}",
+                flush=True,
+            )
+
             return
-        origin = packet.pkt_id.split("-", 1)[0]
-        role = getattr(config, "NODE_ROLE", None)
+
+        role = getattr(
+            config,
+            "NODE_ROLE",
+            None,
+        )
+
+        # --------------------------------------------------------
+        # RELAY
+        # --------------------------------------------------------
+
         if role == "RELAY":
-            self._forward(packet)
+
+            self._forward(
+                packet
+            )
+
             return
-        if role != "BASE" or origin != str(config.OWN_ID):
-            print(f"[ORDER-REPLY-SKIP] role={role} origin={origin}", flush=True)
+
+        # --------------------------------------------------------
+        # BASE A
+        # --------------------------------------------------------
+
+        origin = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
+
+        if (
+            role != "BASE"
+            or origin != str(config.OWN_ID)
+        ):
+
+            print(
+                f"[ORDER-REPLY-SKIP] "
+                f"role={role} "
+                f"origin={origin}",
+                flush=True,
+            )
+
             return
-        original_raw = self.redis.get(f"lora:orders:outgoing:{packet.pkt_id}")
+
+        original_raw = self.redis.get(
+            f"lora:orders:outgoing:"
+            f"{packet.pkt_id}"
+        )
+
         if not original_raw:
-            print(f"[ORDER-REPLY-DROP] mapping missing ask={packet.pkt_id}", flush=True)
+
+            print(
+                f"[ORDER-REPLY-DROP] "
+                f"mapping missing "
+                f"ask={packet.pkt_id}",
+                flush=True,
+            )
+
             return
-        original = json.loads(original_raw)
-        if int(original.get("item_no", -1)) != item_no:
-            print(f"[ORDER-REPLY-DROP] item mismatch ask={packet.pkt_id}", flush=True)
+
+        try:
+
+            original = json.loads(
+                original_raw
+            )
+
+            if int(
+                original.get(
+                    "item_no",
+                    -1,
+                )
+            ) != item_no:
+
+                raise ValueError(
+                    "item mismatch"
+                )
+
+            requested_qty = int(
+                original.get(
+                    "requested_qty",
+                    -1,
+                )
+            )
+
+            if qty > requested_qty:
+
+                raise ValueError(
+                    "qty exceeds request"
+                )
+
+            responder_num = int(
+                match.group(3),
+                36,
+            )
+
+            responder = str(
+                responder_num
+            ).zfill(
+                len(str(config.OWN_ID))
+            )
+
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
+
+            print(
+                f"[ORDER-REPLY-DROP] "
+                f"ask={packet.pkt_id} "
+                f"error={exc}",
+                flush=True,
+            )
+
             return
-        if qty > int(original.get("requested_qty", -1)):
-            print(f"[ORDER-REPLY-DROP] qty too large ask={packet.pkt_id}", flush=True)
-            return
-        responder_num = int(match.group(3), 36)
-        responder = str(responder_num).zfill(len(str(config.OWN_ID)))
+
+        # --------------------------------------------------------
+        # Record
+        # --------------------------------------------------------
+
         record = {
-            "source": "LORA_ORDER_REPLY", "ask_pkt_id": packet.pkt_id,
+            "source": "LORA_ORDER_REPLY",
+            "ask_pkt_id": packet.pkt_id,
             "order_id": original["order_id"],
             "item_code": original["item_code"],
-            "requested_qty": int(original["requested_qty"]),
-            "accepted_qty": qty, "responder_node": responder,
+            "requested_qty": requested_qty,
+            "accepted_qty": qty,
+            "responder_node": responder,
             "received_at": time.time(),
         }
-        serialized = json.dumps(record, ensure_ascii=False)
-        key = f"lora:orders:reply_received:{packet.pkt_id}"
-        if not self.redis.set(key, serialized, nx=True):
-            print(f"[ORDER-REPLY-DUP] ask={packet.pkt_id}", flush=True)
-            return
-        self.redis.lpush("lora:orders:replies", serialized)
-        self.redis.ltrim("lora:orders:replies", 0, 999)
-        print(f"[ORDER-REPLY-RECEIVED] ask={packet.pkt_id} "
-              f"item={record['item_code']} accepted={qty} "
-              f"responder={responder}", flush=True)
 
+        serialized = json.dumps(
+            record,
+            ensure_ascii=False,
+        )
 
-    # ============================================================
-    # 監視用POSの中継（RELAYのみ）
-    # ============================================================
+        key = (
+            "lora:orders:reply_received:"
+            f"{packet.pkt_id}"
+        )
 
-    def _forward_monitor_position(self, packet: Packet) -> None:
-        """
-        POSパケットをTTL限定で中継する。
-        重複排除はhandle_packet()で既に実施されている。
-        pkt_id・start_bstは変更せず、TTLだけ1減らす。
-        """
-        if not packet.can_forward():
+        # --------------------------------------------------------
+        # NEW: 回答元BASEの位置を保存
+        #
+        # mesh_daemon.pyのprocess_receipt()が
+        # 受領通知の宛先として利用する。
+        # --------------------------------------------------------
+
+        position_key = (
+            "lora:orders:reply_position:"
+            f"{packet.pkt_id}"
+        )
+
+        position_record = {
+            "ask_pkt_id": packet.pkt_id,
+            "responder_node": responder,
+            "start_bst": str(
+                packet.start_bst
+            ),
+            "start_bit_len": (
+                packet.start_bit_len
+            ),
+            "received_at": time.time(),
+        }
+
+        # --------------------------------------------------------
+        # 重複登録防止
+        # --------------------------------------------------------
+
+        if not self.redis.set(
+            key,
+            serialized,
+            nx=True,
+        ):
+
             print(
-                f"[MONITOR-NO-FORWARD] id={packet.pkt_id} "
+                f"[ORDER-REPLY-DUP] "
+                f"ask={packet.pkt_id}",
+                flush=True,
+            )
+
+            return
+
+        # REPLY記録と位置情報を保存
+        self.redis.set(
+            position_key,
+            json.dumps(
+                position_record,
+                ensure_ascii=False,
+            ),
+        )
+
+        self.redis.lpush(
+            "lora:orders:replies",
+            serialized,
+        )
+
+        self.redis.ltrim(
+            "lora:orders:replies",
+            0,
+            999,
+        )
+
+        print(
+            f"[ORDER-REPLY-RECEIVED] "
+            f"ask={packet.pkt_id} "
+            f"item={record['item_code']} "
+            f"accepted={qty} "
+            f"responder={responder}",
+            flush=True,
+        )
+
+        print(
+            f"[ORDER-REPLY-POSITION] "
+            f"ask={packet.pkt_id} "
+            f"responder={responder} "
+            f"bst={packet.start_bst}",
+            flush=True,
+        )
+
+    # ============================================================
+    # NEW: REPLY(C): Order Receipt Confirmation
+    # ============================================================
+
+    def _handle_order_receipt(
+        self,
+        packet: Packet,
+    ) -> None:
+        """
+        発注元BASE Aが送信した受領確認を、
+        受注元BASE Bで記録する。
+
+        例:
+            msg_type = REPLY
+            pkt_id   = 0001-5
+            data_id  = C01:2:1
+
+        C01:2:1
+            item_no = 01
+            qty     = 2
+            sender  = 0001
+
+        1つのASKについて1回だけ受領確定する。
+        """
+
+        match = re.fullmatch(
+            r"C(\d{2}):(\d+):([0-9A-Z]+)",
+            packet.data_id,
+        )
+
+        if not match:
+
+            print(
+                f"[ORDER-RECEIPT-DROP] "
+                f"invalid data={packet.data_id!r}",
+                flush=True,
+            )
+
+            return
+
+        item_no = int(
+            match.group(1)
+        )
+
+        received_qty = int(
+            match.group(2)
+        )
+
+        try:
+
+            sender_num = int(
+                match.group(3),
+                36,
+            )
+
+            sender_node = str(
+                sender_num
+            ).zfill(
+                len(str(config.OWN_ID))
+            )
+
+        except ValueError:
+
+            print(
+                "[ORDER-RECEIPT-DROP] "
+                "invalid sender ID",
+                flush=True,
+            )
+
+            return
+
+        if not (
+            1 <= item_no <= len(ITEM_CODES)
+            and 0 <= received_qty <= 9999
+        ):
+
+            print(
+                f"[ORDER-RECEIPT-DROP] "
+                f"invalid item/qty "
+                f"id={packet.pkt_id}",
+                flush=True,
+            )
+
+            return
+
+        if "-" not in packet.pkt_id:
+
+            print(
+                "[ORDER-RECEIPT-DROP] "
+                "invalid ASK packet ID",
+                flush=True,
+            )
+
+            return
+
+        origin = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
+
+        # --------------------------------------------------------
+        # 受領確認は元のASK発行元から送られる
+        # --------------------------------------------------------
+
+        if sender_node != origin:
+
+            print(
+                f"[ORDER-RECEIPT-DROP] "
+                f"sender mismatch "
+                f"ask={packet.pkt_id} "
+                f"sender={sender_node}",
+                flush=True,
+            )
+
+            return
+
+        role = getattr(
+            config,
+            "NODE_ROLE",
+            None,
+        )
+
+        # --------------------------------------------------------
+        # RELAY: 既存の位置指向性で転送
+        # --------------------------------------------------------
+
+        if role == "RELAY":
+
+            print(
+                f"[ORDER-RECEIPT-RELAY] "
+                f"ask={packet.pkt_id} "
                 f"ttl={packet.ttl}",
                 flush=True,
             )
+
+            self._forward(
+                packet
+            )
+
             return
 
-        forward_packet = packet.forwarded()
+        # --------------------------------------------------------
+        # BASE以外は処理しない
+        # --------------------------------------------------------
+
+        if role != "BASE":
+            return
+
+        # 自分が発注元なら受信処理しない
+        if origin == str(config.OWN_ID):
+
+            print(
+                f"[ORDER-RECEIPT-OWN-SKIP] "
+                f"ask={packet.pkt_id}",
+                flush=True,
+            )
+
+            return
+
+        # --------------------------------------------------------
+        # 自局が元のASKを受け付けたBASEか確認
+        # --------------------------------------------------------
+
+        original_key = (
+            "lora:orders:received:"
+            f"{origin}:{packet.pkt_id}"
+        )
+
+        original_raw = self.redis.get(
+            original_key
+        )
+
+        if not original_raw:
+
+            print(
+                f"[ORDER-RECEIPT-DROP] "
+                f"original ASK not found "
+                f"ask={packet.pkt_id}",
+                flush=True,
+            )
+
+            return
+
+        try:
+
+            original = json.loads(
+                original_raw
+            )
+
+            if str(
+                original.get("received_by")
+            ) != str(config.OWN_ID):
+
+                raise ValueError(
+                    "wrong destination BASE"
+                )
+
+            if int(
+                original["item_no"]
+            ) != item_no:
+
+                raise ValueError(
+                    "item mismatch"
+                )
+
+            requested_qty = int(
+                original["requested_qty"]
+            )
+
+            if received_qty > requested_qty:
+
+                raise ValueError(
+                    "received_qty exceeds request"
+                )
+
+            item_code = original[
+                "item_code"
+            ]
+
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
+
+            print(
+                f"[ORDER-RECEIPT-DROP] "
+                f"ask={packet.pkt_id} "
+                f"error={exc}",
+                flush=True,
+            )
+
+            return
+
+        # --------------------------------------------------------
+        # 受領情報を記録
+        # --------------------------------------------------------
+
+        record = {
+            "source": "LORA_ORDER_RECEIPT",
+            "ask_pkt_id": packet.pkt_id,
+            "order_id": (
+                f"lora-{packet.pkt_id}"
+            ),
+            "origin_node": origin,
+            "received_by": str(
+                config.OWN_ID
+            ),
+            "item_code": item_code,
+            "item_no": item_no,
+            "requested_qty": requested_qty,
+            "received_qty": received_qty,
+            "received_at": time.time(),
+        }
+
+        serialized = json.dumps(
+            record,
+            ensure_ascii=False,
+        )
+
+        receipt_key = (
+            "lora:orders:receipt_received:"
+            f"{packet.pkt_id}"
+        )
+
+        # --------------------------------------------------------
+        # 同じASKについて受領記録は1回のみ
+        # --------------------------------------------------------
+
+        if not self.redis.set(
+            receipt_key,
+            serialized,
+            nx=True,
+        ):
+
+            print(
+                f"[ORDER-RECEIPT-DUP] "
+                f"ask={packet.pkt_id}",
+                flush=True,
+            )
+
+            return
+
+        # --------------------------------------------------------
+        # Web同期用Redisリスト
+        # --------------------------------------------------------
+
+        self.redis.lpush(
+            "lora:orders:receipts",
+            serialized,
+        )
+
+        self.redis.ltrim(
+            "lora:orders:receipts",
+            0,
+            999,
+        )
+
+        self.redis.publish(
+            "event:business:receipt_received",
+            serialized,
+        )
+
+        print(
+            f"[ORDER-RECEIPT-RECEIVED] "
+            f"ask={packet.pkt_id} "
+            f"from={origin} "
+            f"item={item_code} "
+            f"received={received_qty} "
+            f"base={config.OWN_ID}",
+            flush=True,
+        )
+
+    # ============================================================
+    # POS Forward
+    # ============================================================
+
+    def _forward_monitor_position(
+        self,
+        packet: Packet,
+    ) -> None:
+
+        if not packet.can_forward():
+
+            print(
+                f"[MONITOR-NO-FORWARD] "
+                f"id={packet.pkt_id} "
+                f"ttl={packet.ttl}",
+                flush=True,
+            )
+
+            return
+
+        forward_packet = (
+            packet.forwarded()
+        )
+
         if forward_packet is None:
             return
 
         try:
-            self._send_packet(forward_packet)
-        except Exception as e:
+
+            self._send_packet(
+                forward_packet
+            )
+
+        except Exception as exc:
+
             print(
-                f"[MONITOR-FORWARD-ERR] id={packet.pkt_id} error={e}",
+                f"[MONITOR-FORWARD-ERR] "
+                f"id={packet.pkt_id} "
+                f"error={exc}",
                 flush=True,
             )
+
             return
 
         print(
-            f"[MONITOR-FORWARD] id={forward_packet.pkt_id} "
-            f"ttl={packet.ttl}->{forward_packet.ttl} "
-            f"start_bst={forward_packet.start_bst}",
+            f"[MONITOR-FORWARD] "
+            f"id={forward_packet.pkt_id} "
+            f"ttl={packet.ttl}"
+            f"->{forward_packet.ttl}",
             flush=True,
         )
 
-
     # ============================================================
-    # Forward
+    # Directional Forward
     # ============================================================
 
-    def _forward(self, packet: Packet) -> None:
-        """
-        TTLに加えて位置指向性で中継判断する。
-
-        packet.distance:
-            直前の送信ノードからgoalまでの距離[m]
-
-        local_distance:
-            自ノードからgoalまでの距離[m]
-
-        """
+    def _forward(
+        self,
+        packet: Packet,
+    ) -> None:
 
         if not packet.can_forward():
             return
 
-        # 自ノードからgoalまでの距離
-        local_distance = self._distance_to_bst(
-            packet.goal_bst,
-            packet.goal_bit_len,
+        local_distance = (
+            self._distance_to_bst(
+                packet.goal_bst,
+                packet.goal_bit_len,
+            )
         )
 
         if local_distance is None:
@@ -682,7 +1443,10 @@ class Routing:
             return
 
         try:
-            previous_distance = float(packet.distance)
+
+            previous_distance = float(
+                packet.distance
+            )
 
         except (
             TypeError,
@@ -691,7 +1455,6 @@ class Routing:
 
             print(
                 f"[DIRECTION-DROP] "
-                f"type={packet.msg_type} "
                 f"id={packet.pkt_id} "
                 f"reason=invalid_previous_distance",
                 flush=True,
@@ -699,21 +1462,20 @@ class Routing:
 
             return
 
-        if previous_distance <= 0.0:
+        if (
+            not math.isfinite(previous_distance)
+            or previous_distance <= 0.0
+        ):
 
             print(
                 f"[DIRECTION-DROP] "
-                f"type={packet.msg_type} "
                 f"id={packet.pkt_id} "
-                f"prev={previous_distance:.2f} "
-                f"local={local_distance:.2f} "
                 f"reason=invalid_previous_distance",
                 flush=True,
             )
 
             return
 
-        # 最低1mはgoal方向へ前進したノードだけ中継
         min_progress_m = 1.0
 
         if (
@@ -732,13 +1494,16 @@ class Routing:
 
             return
 
-        forward_packet = packet.forwarded()
+        forward_packet = (
+            packet.forwarded()
+        )
 
         if forward_packet is None:
             return
 
-        # 次のノードが比較できるように距離を書き換える
-        forward_packet.distance = local_distance
+        forward_packet.distance = (
+            local_distance
+        )
 
         self._send_packet(
             forward_packet
@@ -747,6 +1512,7 @@ class Routing:
         print(
             f"[DIRECTION-FORWARD] "
             f"type={forward_packet.msg_type} "
+            f"data={forward_packet.data_id} "
             f"id={forward_packet.pkt_id} "
             f"prev={previous_distance:.2f} "
             f"local={local_distance:.2f} "
@@ -754,44 +1520,48 @@ class Routing:
             flush=True,
         )
 
-
     # ============================================================
-    # 自ノード送信Packet登録
+    # Mark Sent
     # ============================================================
 
-    def mark_sent(self, packet: Packet) -> None:
+    def mark_sent(
+        self,
+        packet: Packet,
+    ) -> None:
         """
-        自ノードが生成したPacketを
-        Duplicate Suppressionへ登録する。
+        自ノードが生成したパケットを
+        重複排除テーブルに登録する。
+
+        PとCは別のキーで登録する。
         """
 
-        self.duplicate_suppressor.is_duplicate(
-            packet.msg_type,
-            packet.pkt_id,
+        self._is_duplicate(
+            packet
         )
 
-
     # ============================================================
-    # ASK送信元位置保存
+    # Save ASK Sender Position
     # ============================================================
 
-    def _save_sender_position(self, packet: Packet) -> None:
-        """
-        ASK送信元のBST-IDをlat/lonへ戻し、
-        Web表示用のRedisキーへ保存する。
-        """
+    def _save_sender_position(
+        self,
+        packet: Packet,
+    ) -> None:
 
         try:
 
-            lon, lat, _, _ = BSTIDDecoder.decode(
-                packet.start_bst,
-                packet.start_bit_len,
+            lon, lat, _, _ = (
+                BSTIDDecoder.decode(
+                    packet.start_bst,
+                    packet.start_bit_len,
+                )
             )
 
-        except Exception as e:
+        except Exception as exc:
 
             print(
-                f"[NODE-POS-ERR] BST decode failed: {e}",
+                f"[NODE-POS-ERR] "
+                f"BST decode failed: {exc}",
                 flush=True,
             )
 
@@ -800,16 +1570,12 @@ class Routing:
         if lat is None or lon is None:
 
             print(
-                "[NODE-POS-ERR] lat/lon is None",
+                "[NODE-POS-ERR] "
+                "lat/lon is None",
                 flush=True,
             )
 
             return
-
-
-        # pkt_id = "0001-20"
-        #       ↓
-        # node_id = "0001"
 
         node_id = packet.pkt_id.split(
             "-",
@@ -820,16 +1586,23 @@ class Routing:
             "node_id": node_id,
             "lat": lat,
             "lon": lon,
-            "bst_id_int": str(packet.start_bst),
-            "bst_bit_len": packet.start_bit_len,
+            "bst_id_int": str(
+                packet.start_bst
+            ),
+            "bst_bit_len": (
+                packet.start_bit_len
+            ),
+            "updated_at": time.time(),
+            "source": "ASK",
         }
 
-        
-        key = f"lora:nodes:{node_id}"
+        key = (
+            f"lora:nodes:{node_id}"
+        )
 
         self.redis.set(
             key,
-            json.dumps(node_state)
+            json.dumps(node_state),
         )
 
         print(
@@ -840,69 +1613,124 @@ class Routing:
             flush=True,
         )
 
-
-
     # ============================================================
-    # 移動ノードのREPLY位置通知を基地局で保存
+    # Save Mobile Position
     # ============================================================
 
-    def _save_mobile_position(self, packet: Packet) -> None:
-        """
-        data_id="POS" のREPLYに含まれるstart_bstを位置へ復元し、
-        各基地局のローカルRedisに保存する。
+    def _save_mobile_position(
+        self,
+        packet: Packet,
+    ) -> None:
 
-        監視用REPLYのpkt_idは「移動ノードOWN_ID-連番」とする。
-        BST-IDを復元した座標であり、生のGPS座標ではない。
-        """
-        import time
+        node_id = packet.pkt_id.split(
+            "-",
+            1,
+        )[0]
 
-        node_id = packet.pkt_id.split("-", 1)[0]
-        if not node_id or "-" not in packet.pkt_id:
-            print(f"[MONITOR-DROP] invalid pkt_id={packet.pkt_id}", flush=True)
+        if (
+            not node_id
+            or "-" not in packet.pkt_id
+        ):
+
+            print(
+                f"[MONITOR-DROP] "
+                f"invalid pkt_id={packet.pkt_id}",
+                flush=True,
+            )
+
             return
 
         try:
-            lon, lat, _, _ = BSTIDDecoder.decode(
-                packet.start_bst,
-                packet.start_bit_len,
+
+            lon, lat, _, _ = (
+                BSTIDDecoder.decode(
+                    packet.start_bst,
+                    packet.start_bit_len,
+                )
             )
-            if lat is None or lon is None:
-                raise ValueError("decoded coordinates are missing")
+
+            if (
+                lat is None
+                or lon is None
+            ):
+                raise ValueError(
+                    "decoded coordinates missing"
+                )
+
             lat = float(lat)
             lon = float(lon)
-            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                raise ValueError("decoded coordinates out of range")
-        except (ValueError, TypeError, OverflowError) as e:
-            print(f"[MONITOR-DROP] invalid position id={packet.pkt_id}: {e}", flush=True)
-            return
-        except Exception as e:
-            print(f"[MONITOR-DROP] BST decode failed id={packet.pkt_id}: {e}", flush=True)
+
+            if not (
+                -90 <= lat <= 90
+                and -180 <= lon <= 180
+            ):
+                raise ValueError(
+                    "coordinates out of range"
+                )
+
+        except Exception as exc:
+
+            print(
+                f"[MONITOR-DROP] "
+                f"id={packet.pkt_id} "
+                f"error={exc}",
+                flush=True,
+            )
+
             return
 
         node_state = {
             "node_id": node_id,
             "lat": lat,
             "lon": lon,
-            "bst_id_int": str(packet.start_bst),
-            "bst_bit_len": packet.start_bit_len,
+            "bst_id_int": str(
+                packet.start_bst
+            ),
+            "bst_bit_len": (
+                packet.start_bit_len
+            ),
             "updated_at": time.time(),
             "packet_id": packet.pkt_id,
             "source": "REPLY_POS",
         }
-        prefix = getattr(config, "REDIS_NODE_PREFIX", "lora:nodes:")
-        key = f"{prefix}{node_id}"
-        # Count only unique monitoring packets. handle_packet() has already
-        # rejected duplicates using (msg_type, pkt_id).
-        count_key = f"lora:monitor:rx_count:{node_id}"
-        rx_count = self.redis.incr(count_key)
-        node_state["rx_count"] = rx_count
 
-        # Preserve the existing key used by the map/web integration.
-        self.redis.set(key, json.dumps(node_state))
+        prefix = getattr(
+            config,
+            "REDIS_NODE_PREFIX",
+            "lora:nodes:",
+        )
+
+        key = (
+            f"{prefix}{node_id}"
+        )
+
+        # --------------------------------------------------------
+        # Receive Count
+        # --------------------------------------------------------
+
+        count_key = (
+            f"lora:monitor:rx_count:{node_id}"
+        )
+
+        rx_count = self.redis.incr(
+            count_key
+        )
+
+        node_state["rx_count"] = (
+            rx_count
+        )
+
+        self.redis.set(
+            key,
+            json.dumps(node_state),
+        )
 
         print(
-            f"[MONITOR-REPLY] node={node_id} "
-            f"pkt={packet.pkt_id} lat={lat:.8f} lon={lon:.8f} "
+            f"[MONITOR-REPLY] "
+            f"node={node_id} "
+            f"pkt={packet.pkt_id} "
+            f"lat={lat:.8f} "
+            f"lon={lon:.8f} "
             f"rx_count={rx_count}",
             flush=True,
         )
