@@ -16,6 +16,7 @@ from routing import Routing
 ORDER_CHANNEL = "event:business:order_created"
 OFFER_CHANNEL = "event:business:offer_created"
 RECEIPT_CHANNEL = "event:business:receipt_created"
+LOCAL_NODE_ID_KEY = "lora:gateway:local_node_id"
 COUNTER_KEY = f"lora:order:ask_seq:{config.OWN_ID}"
 TTL = 10
 
@@ -161,6 +162,8 @@ def process_order(r, routing, msg):
         )
 
 
+
+
 # REPLY uses the existing binary Packet type (type=1), with data_id
 # Pxx:qty:node36 e.g. P01:2:2 = node 0002 offers 2 units of water.
 # One reply is supported per ASK packet ID in this initial implementation.
@@ -249,104 +252,71 @@ def process_offer(r, routing, msg):
     )
 
 
-# ============================================================
-# NEW: REPLY(C) 受領通知
-# ============================================================
+
 
 def process_receipt(r, routing, msg):
-    """発注元BASEから受注元BASEへ、物資の受領完了を通知する。"""
+    """One complete receipt for one ASK; destination is the original responder."""
+    import re
     if msg.get("type") != "ORDER_RECEIPT":
         return
-
-    ask_id = msg.get("ask_pkt_id")
-    if not isinstance(ask_id, str) or "-" not in ask_id:
+    ask_id = str(msg.get("ask_pkt_id") or "")
+    if not re.fullmatch(r"[0-9A-Za-z]+-[0-9A-Za-z]+", ask_id):
         raise ValueError("invalid ask_pkt_id")
-
-    origin = ask_id.split("-", 1)[0]
-    if origin != str(config.OWN_ID):
-        raise ValueError("only the original requester can confirm receipt")
-
-    # 元のASKと受信済みREPLY(P)を取得
+    if ask_id.split("-", 1)[0] != str(config.OWN_ID):
+        raise ValueError("receipt can only be sent by original requester")
     raw = r.get(f"lora:orders:outgoing:{ask_id}")
     reply_raw = r.get(f"lora:orders:reply_received:{ask_id}")
     if not raw or not reply_raw:
-        raise ValueError("outgoing ASK or received REPLY not found")
-
+        raise ValueError("original ASK or received REPLY unavailable")
     original, reply = json.loads(raw), json.loads(reply_raw)
     if str(msg.get("order_id")) != str(original["order_id"]):
-        raise ValueError("order_id mismatch")
-
+        raise ValueError("order mismatch")
     item_no = int(original["item_no"])
-    requested = int(original["requested_qty"])
     accepted = int(reply["accepted_qty"])
     received = int(msg.get("received_qty"))
-
-    # 初期仕様：提供可能と回答された数量を一度に全て受領
-    if not (0 < received == accepted <= requested):
-        raise ValueError("only full receipt of a positive offered quantity is supported")
-
+    if not (0 <= received <= accepted <= int(original["requested_qty"])):
+        raise ValueError("receipt quantity out of range")
+    if received != accepted:
+        raise ValueError("initial version supports full receipt only")
     responder = str(reply["responder_node"])
     if str(msg.get("responder_node")) != responder:
-        raise ValueError("responder_node mismatch")
-
-    # REPLY(P)受信時に保存した基地局Bの位置
-    target_raw = r.get(f"lora:orders:reply_position:{ask_id}")
-    if not target_raw:
-        raise ValueError("REPLY(P) sender position missing")
-
-    target = json.loads(target_raw)
-    if str(target.get("responder_node")) != responder:
-        raise ValueError("REPLY(P) sender position does not match responder")
-
-    goal_bst = int(target["start_bst"])
-    goal_bits = int(target["start_bit_len"])
-    goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(goal_bst, goal_bits)
-
-    # 自分（発注元BASE）の現在位置
-    lat, lon = own_position(r)
+        raise ValueError("responder mismatch")
+    own_lat, own_lon = own_position(r)
     zx = getattr(config, "BST_ZOOM_X", getattr(config, "BST_ZX", None))
     zy = getattr(config, "BST_ZOOM_Y", getattr(config, "BST_ZY", None))
     if zx is None or zy is None:
-        raise ValueError("BST zoom setting missing")
-
-    start_bst, start_bits = encode_position(lon, lat, zx, zy)
-    distance = max(0.01, haversine_distance_m(lat, lon, goal_lat, goal_lon))
-
-    # C01:2:1 = ノード0001が物資01を2個受領
-    # バイナリ形式は従来のREPLYを流用する
-    data_id = f"C{item_no:02d}:{received}:{base36(int(origin))}"
+        raise ValueError("missing BST zoom settings")
+    start_bst, start_bits = encode_position(own_lon, own_lat, zx, zy)
+    # Use responder position from REPLY's start BST, captured at RX time.
+    target_raw = r.get(f"lora:orders:reply_position:{ask_id}")
+    if not target_raw:
+        raise ValueError("responder position unavailable; receive a new REPLY")
+    target = json.loads(target_raw)
+    goal_bst, goal_bits = int(target["start_bst"]), int(target["start_bit_len"])
+    goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(goal_bst, goal_bits)
+    distance = max(0.01, haversine_distance_m(own_lat, own_lon, goal_lat, goal_lon))
+    data_id = f"C{item_no:02d}:{received}:{base36(int(config.OWN_ID))}"
+    # Existing binary REPLY type: the C prefix distinguishes receipt from offer (P).
     packet = make_reply_packet(
         pkt_id=ask_id,
         goal_bst=goal_bst, goal_bit_len=goal_bits,
         start_bst=start_bst, start_bit_len=start_bits,
         data_id=data_id, ttl=TTL, distance=distance,
     )
-
     payload = packet.encode()
-    max_bytes = min(50, int(getattr(config, "MAX_BINARY_PAYLOAD_LEN", 50)))
-    if len(payload) > max_bytes:
-        raise ValueError(f"receipt packet too large: {len(payload)} bytes")
-
-    # 1つのASKに対して受領確認は1回だけ送信キューへ登録
+    if len(payload) > min(50, int(getattr(config,"MAX_BINARY_PAYLOAD_LEN",50))):
+        raise ValueError("receipt exceeds radio limit")
     guard = f"lora:orders:receipt_tx:{ask_id}"
     if not r.set(guard, json.dumps(msg), nx=True):
         print(f"[ORDER-RECEIPT-DUP] ask={ask_id}", flush=True)
         return
-
     try:
         r.lpush(config.REDIS_RAW_TX, payload.hex())
     except Exception:
         r.delete(guard)
         raise
-
     routing.mark_sent(packet)
-
-    print(
-        f"[ORDER-RECEIPT-QUEUED] ask={ask_id} "
-        f"received={received} to={responder} data_id={data_id} "
-        f"bytes={len(payload)}",
-        flush=True,
-    )
+    print(f"[ORDER-RECEIPT-QUEUED] ask={ask_id} received={received} to={responder} data_id={data_id} bytes={len(payload)}", flush=True)
 
 
 def decode_payload_hex(payload_hex: str):
@@ -398,6 +368,13 @@ def main():
         decode_responses=True,
     )
 
+    # config.OWN_ID is the single source of truth for the local BASE node ID.
+    # The Web reads it via this local Redis instance, never from a form field.
+    is_base = getattr(config, "NODE_ROLE", None) == "BASE"
+    if is_base:
+        r.set(LOCAL_NODE_ID_KEY, str(config.OWN_ID), ex=15)
+        print(f"[LOCAL-NODE-ID] {config.OWN_ID}", flush=True)
+
     if getattr(config, "USE_DUMMY_GPS", False):
         dummy_position = {
             "lat": config.DUMMY_LAT,
@@ -409,7 +386,7 @@ def main():
             config.REDIS_GPS_STATE_KEY,
             json.dumps(dummy_position)
         )
-
+    
         print(
             f"[DUMMY-GPS] "
             f"lat={config.DUMMY_LAT} "
@@ -417,11 +394,13 @@ def main():
             flush=True,
         )
 
+
     # ============================================================
     # Routing
     # ============================================================
 
     routing = Routing(r)
+
 
     # ============================================================
     # Redis Pub/Sub
@@ -434,57 +413,67 @@ def main():
     channels = [config.REDIS_EVENT]
     if getattr(config, "NODE_ROLE", None) == "BASE":
         channels.extend((ORDER_CHANNEL, OFFER_CHANNEL, RECEIPT_CHANNEL))
-
     pubsub.subscribe(*channels)
     print(f"[MESH-CHANNELS] {channels}", flush=True)
+
 
     print(
         "[MESH-DAEMON] started",
         flush=True
     )
 
+
     try:
+
         while True:
+            # Refresh ephemeral node identity; disappears if the daemon dies.
+            if is_base:
+                r.set(LOCAL_NODE_ID_KEY, str(config.OWN_ID), ex=15)
 
             message = pubsub.get_message(
                 timeout=1.0
             )
 
+
             if message is None:
+
                 time.sleep(0.05)
+
                 continue
+
 
             # ====================================================
             # JSON event
             # ====================================================
 
             try:
+
                 event = json.loads(
                     message["data"]
                 )
+
 
             except (
                 TypeError,
                 json.JSONDecodeError,
             ):
+
                 print(
                     f"[MESH] invalid event: "
                     f"{message.get('data')}",
                     flush=True,
                 )
+
                 continue
 
-            channel = message.get("channel")
 
-            # Web発注イベント
+            channel = message.get("channel")
             if channel == ORDER_CHANNEL:
                 try:
                     process_order(r, routing, event)
                 except Exception as exc:
                     print(f"[ORDER-ASK-ERR] {type(exc).__name__}: {exc}", flush=True)
                 continue
-
-            # Web回答イベント
             if channel == OFFER_CHANNEL:
                 try:
                     process_offer(r, routing, event)
@@ -492,7 +481,6 @@ def main():
                     print(f"[ORDER-REPLY-ERR] {type(exc).__name__}: {exc}", flush=True)
                 continue
 
-            # NEW: Web受領完了イベント
             if channel == RECEIPT_CHANNEL:
                 try:
                     process_receipt(r, routing, event)
@@ -502,8 +490,8 @@ def main():
 
             if not isinstance(event, dict):
                 continue
-
             event_type = event.get("event")
+
 
             # ====================================================
             # 自分自身が生成したPacket
@@ -521,16 +509,20 @@ def main():
                     "payload_hex"
                 )
 
+
                 packet = decode_payload_hex(
                     payload_hex
                 )
 
+
                 if packet is None:
                     continue
+
 
                 routing.mark_sent(
                     packet
                 )
+
 
                 print(
                     f"[MESH-LOCAL] "
@@ -539,7 +531,9 @@ def main():
                     flush=True,
                 )
 
+
                 continue
+
 
             # ====================================================
             # LoRa RX
@@ -548,16 +542,21 @@ def main():
             if event_type != "rx":
                 continue
 
+
             payload_hex = event.get(
                 "payload_hex"
             )
+
 
             packet = decode_payload_hex(
                 payload_hex
             )
 
+
             if packet is None:
                 continue
+
+
 
             # ====================================================
             # Routing
@@ -567,13 +566,17 @@ def main():
                 packet
             )
 
+
     except KeyboardInterrupt:
+
         print(
             "\n[MESH-DAEMON] stopped",
             flush=True
         )
 
+
     finally:
+
         pubsub.close()
 
 
