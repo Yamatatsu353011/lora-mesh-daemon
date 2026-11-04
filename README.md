@@ -1,433 +1,269 @@
-# lora-daemon
+# lora-mesh-daemon
 
-LoRa/BST-ID disaster-support mesh system の LoRa 制御デーモンです。
+LoRa/BST-IDを利用した分散型通信システムです。
 
-このコンポーネントは、EASEL ES920LR LoRaデバイスをPythonから制御し、自己位置/BST-IDビーコン送信、常時受信、Slotted ALOHA、将来的なFlooding、Duplicate Suppression、Implicit ACK、BST-ID指向性転送を担当します。
+EASEL ES920LRをPythonから制御し、LoRa送受信、GPS/BST-IDによる位置共有、Slotted ALOHA、ASK/REPLY通信、パケット中継などを行います。
 
-## Role
+Web側の発注・受注処理とはRedisを介して連携します。
 
-`lora-daemon` は、システム全体の中で以下を担当します。
+## 1. 開発環境
 
-* EASEL ES920LRのシリアル制御
-* LoRa送受信
-* ES920LR設定
-* Slotted ALOHA型の周期送信
-* 自己位置/BST-IDビーコン送信
-* 受信した他ノード情報のRedis保存
-* 今後のFlooding / Duplicate Suppression / Implicit ACK / BST-ID forwarding
+**ハードウェア**
+- Ubuntu搭載PC / Windows PC / Raspberry Pi
+- EASEL ES920LR
+- GPS/GNSS受信機（使用するノードのみ）
 
-業務ロジック、SQLite検索、支援物資問い合わせ、イベント管理などはこのコンポーネントには含めません。
-それらは `lora-gateway-web` またはBusiness Driver側で扱います。
+**ソフトウェア**
+- Python 3
+- Redis
+- Git
+- Python仮想環境（venv）
 
-## System Position
+## 2. 主なファイル
 
-```text
-GPS / Redis state
-  ↓
-lora-daemon
-  ↓
-EASEL ES920LR
-  ↓
-LoRa mesh
-  ↓
-Other nodes
-```
+| ファイル | 役割 |
+|---|---|
+| `config.py` | ノードID・通信設定 |
+| `easel_radio.py` | LoRaデバイス制御 |
+| `raw_daemon.py` | LoRa送受信・Redis連携 |
+| `mesh_daemon.py` | ASK/REPLY生成・イベント処理 |
+| `routing.py` | パケット中継・重複排除・経路制御 |
+| `packet.py` | パケット構造・エンコード |
+| `slotted_aloha.py` | 送信タイミング制御 |
+| `gps_redis_service.py` | GPS情報をRedisへ保存 |
+| `ask_sender.py` | ASK送信処理 |
+| `rx_test.py` / `tx_test.py` | 送受信テスト |
 
-## Current Layer
+## 3. 環境構築
 
-Current implementation focuses on Layer 0/1:
+以下はUbuntu環境の例です。
 
-```text
-Layer 0:
-  ES920LR open/configure/read/write
-
-Layer 1:
-  Slotted self beacon
-  BST-ID beacon
-  Redis lora:nodes:* update
-```
-
-Future layers:
-
-```text
-Layer 2:
-  Packet / Token
-
-Layer 3:
-  Flooding + duplicate suppression
-
-Layer 4:
-  BST-ID directed forwarding
-
-Layer 5:
-  Implicit ACK and retry control
-
-Layer 6:
-  Business/Web driver interface
-```
-
-## Repository Layout
-
-```text
-config.py
-  Node identity and ES920LR settings
-
-easel_radio.py
-  Minimal ES920LR serial driver
-
-rx_test.py
-  RX test script
-
-tx_test.py
-  TX test script
-
-raw_daemon.py
-  Redis raw TX/RX daemon
-
-slotted_beacon_daemon.py
-  Slotted ALOHA self-position/BST-ID beacon daemon
-
-bst_codec.py
-  Interface to bst-id library and BST-ID hex conversion
-```
-
-## Hardware
-
-Expected hardware:
-
-```text
-Notebook PC / small desktop PC
-or
-Raspberry Pi Zero 2 W
-
-EASEL ES920LR LoRa module
-GPS/GNSS receiver
-```
-
-The LoRa device should be fixed as:
-
-```text
-/dev/lora0
-```
-
-using udev.
-
-## udev Rule
-
-For EASEL FT231X USB UART:
-
-```bash
-sudo nano /etc/udev/rules.d/99-lora-easel.rules
-```
-
-Example:
-
-```udev
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", ATTRS{serial}=="DM01MXDO", SYMLINK+="lora0", GROUP="dialout", MODE="0660"
-```
-
-Reload:
-
-```bash
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-Reconnect the device and check:
-
-```bash
-ls -l /dev/lora0
-```
-
-Add user to dialout:
-
-```bash
-sudo usermod -aG dialout $USER
-```
-
-Log out/in or reboot.
-
-## Installation
+### リポジトリの取得
 
 ```bash
 cd /opt
-sudo git clone https://github.com/yagu1/lora-daemon.git
-sudo chown -R $USER:$USER /opt/lora-daemon
+sudo git clone https://github.com/Yamatatsu353011/lora-mesh-daemon.git
+sudo chown -R $USER:$USER /opt/lora-mesh-daemon
+```
 
-cd /opt/lora-daemon
+### Python仮想環境
+
+```bash
+cd /opt/lora-mesh-daemon
+
 python3 -m venv .venv
 source .venv/bin/activate
+
 pip install --upgrade pip
-pip install pyserial redis python-dotenv
+pip install pyserial redis python-dotenv pynmea2
 ```
 
-If using BST-ID:
+### BST-IDライブラリ
 
 ```bash
 cd /opt
+
 sudo git clone https://github.com/yagu1/bst-id.git
 sudo chown -R $USER:$USER /opt/bst-id
 
-cd /opt/lora-daemon
+cd /opt/lora-mesh-daemon
 source .venv/bin/activate
+
 pip install -e /opt/bst-id
 ```
 
-Check:
+確認：
 
 ```bash
 python -c "from bst_id.encoder import BSTIDEncoder; print('BST-ID OK')"
 ```
 
-## Node Configuration
+## 4. config.pyの設定
 
-Edit:
+GitHubには設定テンプレートとして`config_temolate.py`が用意されています。
 
 ```bash
+cd /opt/lora-mesh-daemon
+
+cp config_temolate.py config.py
 nano config.py
 ```
 
-Example for base node 1:
+### ノードID
+
+基地局1：
 
 ```python
 NODE_ID = "yaglabterm01"
 OWN_ID = "0001"
 ```
 
-Example for base node 2:
+基地局2：
 
 ```python
 NODE_ID = "yaglabterm02"
 OWN_ID = "0002"
 ```
 
-Common radio settings:
+`OWN_ID`はノードごとに異なる値を設定してください。
+
+### GPS設定
+
+GPSを使用しない基地局：
 
 ```python
-BW = "6"       # 500 kHz
-SF = "8"       # spreading factor 8
-CH = "1"       # channel 1, valid under 500 kHz
+USE_DUMMY_GPS = True
+
+DUMMY_LAT = 37.521844
+DUMMY_LON = 139.939698
+```
+
+GPSを使用するノード：
+
+```python
+USE_DUMMY_GPS = False
+GPS_SERIAL_PORT = "/dev/ttyS0"
+GPS_BAUDRATE = 9600
+```
+
+GPSのポートは実際の接続環境に合わせて変更してください。
+
+### LoRa通信設定
+
+```python
+SERIAL_PORT = "/dev/lora0"
+BAUDRATE = 115200
+
+BW = "6"
+SF = "8"
+CH = "1"
 
 PAN_ID = "ABCD"
 DST_ID = "FFFF"
+
 ACK = "2"
 RETRY = "0"
+
 TRANSMODE = "1"
-FORMAT = "1"
+FORMAT = "2"
 ```
 
-ES920LR command mapping:
+| 項目 | 設定 |
+|---|---|
+| BW | 500 kHz |
+| SF | 8 |
+| CH | 1 |
+| PAN_ID | ABCD |
+| DST_ID | FFFF（ブロードキャスト） |
+| FORMAT | 2（バイナリ形式） |
 
-```text
-bw 6       500 kHz
-sf 8       spreading factor 8
-channel 1  channel 1
-dstid FFFF broadcast
+通信するノード間でBW・SF・CH・PAN_IDを一致させてください。
+
+Windowsでは`SERIAL_PORT = "COM3"`など、実際のポート名を指定します。
+
+### Redis設定
+
+```python
+REDIS_ENABLED = True
+
+REDIS_HOST = "127.0.0.1"
+REDIS_PORT = 6379
+REDIS_DB = 0
 ```
 
-## Test RX
+Redisを別のPCや環境で動かす場合は、接続先を適切に変更してください。
 
-On receiver:
+また、テンプレートには次の設定があります。
+
+```python
+REDIS_CLEAN_ON_START = True
+```
+
+起動時に既存のLoRa関連Redisデータを削除する設定です。既存データを保持したい場合は`False`に変更してください。
+
+## 5. 動作確認
+
+### Redis接続確認
 
 ```bash
-cd /opt/lora-daemon
-source .venv/bin/activate
+redis-cli ping
+```
+
+正常時：
+
+```text
+PONG
+```
+
+### LoRa送受信テスト
+
+受信側：
+
+```bash
 python rx_test.py
 ```
 
-## Test TX
-
-On transmitter:
+送信側：
 
 ```bash
-cd /opt/lora-daemon
-source .venv/bin/activate
 python tx_test.py
 ```
 
-Expected receiver output:
+※ 同じLoRaデバイスを複数のプログラムから同時に操作しないでください。
 
-```text
-[RX-LINE] T,yaglabterm01,0
-[APP-RX] T,yaglabterm01,0
-```
+## 6. デーモンの起動
 
-## Slotted Beacon Daemon
+各プログラムは別のターミナルで起動します。
 
-Run:
+### GPS情報取得
 
 ```bash
-cd /opt/lora-daemon
-source .venv/bin/activate
-python slotted_beacon_daemon.py
+python gps_redis_service.py
 ```
 
-The daemon:
-
-```text
-- always listens for LoRa packets
-- selects one slot per frame
-- transmits its own node status once per frame
-- encodes position as official BST-ID
-- stores received node status into Redis
-```
-
-Current beacon format:
-
-```text
-B,<node2>,<seq>,<bit_len>,<bst_hex>,<alt>,<spd10>,<heading>
-```
-
-Example:
-
-```text
-B,02,11,46,31EFE383632C,256,3,185
-```
-
-This does not include raw latitude/longitude.
-Web-side node display recovers approximate tile center from BST-ID.
-
-## Redis Keys
-
-Received raw lines:
-
-```text
-lora:raw:rx
-```
-
-Parsed node states:
-
-```text
-lora:nodes:<node_id>
-```
-
-Radio state:
-
-```text
-lora:state:radio
-```
-
-Events:
-
-```text
-lora:event
-```
-
-Examples:
+### LoRa送受信
 
 ```bash
+python raw_daemon.py
+```
+
+### メッシュ通信処理
+
+```bash
+python mesh_daemon.py
+```
+
+GPS情報取得 → LoRa送受信 → メッシュ通信処理の順に起動すると、動作を確認しやすくなります。
+
+※ systemdでサービス化している場合は、同じプログラムを重複起動しないでください。
+
+## 7. Redisデータ確認
+
+主なキー：
+
+| キー | 内容 |
+|---|---|
+| `state:self` | 自ノードの位置 |
+| `lora:raw:tx` | LoRa送信キュー |
+| `lora:raw:rx` | LoRa受信データ |
+| `lora:nodes:*` | 他ノードの位置情報 |
+| `lora:event` | LoRa関連イベント |
+
+確認例：
+
+```bash
+redis-cli GET state:self
 redis-cli LRANGE lora:raw:rx 0 -1
 redis-cli KEYS 'lora:nodes:*'
-redis-cli GET lora:nodes:yaglabterm02 | python3 -m json.tool
 ```
 
-## Redis Cleanup
+## 8. 注意事項
 
-The daemon may clean old LoRa keys at startup.
+- ノードごとに`config.py`を設定すること。
+- LoRa通信パラメータは全ノードで統一すること。
+- Redisが起動していることを確認すること。
+- 無線デバイスを複数のプログラムで同時使用しないこと。
+- `config.py`はGit管理対象外のため、各環境で作成すること。
+- 実機とGitHubのコード・設定が一致しているか確認すること。
 
-Typical patterns:
-
-```text
-lora:raw:*
-lora:event
-lora:state:radio
-lora:nodes:*
-```
-
-GPS Redis keys such as `state:gps` and `state:self` should not be deleted by LoRa daemon.
-
-## systemd Service
-
-Create:
-
-```bash
-sudo nano /etc/systemd/system/lora-daemon.service
-```
-
-Example:
-
-```ini
-[Unit]
-Description=LoRa EASEL Slotted Beacon Daemon
-After=network.target redis-server.service
-Wants=redis-server.service
-
-[Service]
-WorkingDirectory=/opt/lora-daemon
-ExecStart=/opt/lora-daemon/.venv/bin/python /opt/lora-daemon/slotted_beacon_daemon.py
-Restart=always
-RestartSec=3
-User=YOUR_USERNAME
-Group=dialout
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now lora-daemon.service
-```
-
-Logs:
-
-```bash
-journalctl -u lora-daemon.service -f
-```
-
-## Development Roadmap
-
-### Current
-
-```text
-- ES920LR Python TX/RX
-- 500 kHz / SF8 / channel 1
-- Slotted ALOHA-like self beacon
-- BST-ID hex beacon
-- Redis node state
-```
-
-### Next
-
-```text
-- Packet / Token layer
-- Flooding
-- Duplicate suppression
-- TTL / hop count
-- BST-ID containment and directional forwarding
-- Implicit ACK based on returned packet similarity
-- Business/Web driver interface
-```
-
-## Design Notes
-
-ACK/ORDER/ASK/REPLY are not implemented directly in the raw beacon layer.
-
-The planned division is:
-
-```text
-Business/Web Driver:
-  understands business protocol and SQLite
-
-LoRa Daemon:
-  understands radio, mesh propagation, duplicate suppression, BST-ID routing
-
-Redis:
-  boundary and runtime state
-```
-
-## Related Repositories
-
-```text
-lora-gateway-web
-  Web UI, business process, SQLite, node/event maps
-
-gps-redis-service
-  GPS/gpsd/chrony state to Redis
-
-bst-id
-  BST-ID Python library
-```
+Web側の発注・受注画面については、別リポジトリ`lora-gateway-web`で管理します。
