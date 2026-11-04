@@ -267,3 +267,171 @@ redis-cli KEYS 'lora:nodes:*'
 - 実機とGitHubのコード・設定が一致しているか確認すること。
 
 Web側の発注・受注画面については、別リポジトリ`lora-gateway-web`で管理します。
+
+
+## Windows環境でのセットアップ
+
+WindowsではPowerShellを使用して環境構築します。
+
+LoRa制御プログラムはWindows上で実行し、RedisはWSL（Ubuntu）側で動作させます。
+
+### 1. Python・Gitのインストール
+
+PowerShellで実行します。
+
+```powershell
+winget install --id Python.Python.3.12 -e
+winget install --id Git.Git -e
+```
+
+インストール後、PowerShellを開き直して確認します。
+
+```powershell
+python --version
+git --version
+```
+
+### 2. リポジトリの取得
+
+```powershell
+cd $HOME\Documents
+
+New-Item -ItemType Directory -Force LoRa
+cd LoRa
+
+git clone https://github.com/Yamatatsu353011/lora-mesh-daemon.git
+```
+
+### 3. Python仮想環境
+
+```powershell
+cd lora-mesh-daemon
+
+python -m venv .venv
+
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install pyserial redis python-dotenv pynmea2
+```
+
+仮想環境を有効化できない場合は、PowerShellで以下を実行してから再試行します。
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### 4. BST-IDライブラリ
+
+`lora-mesh-daemon`と同じ階層にインストールします。
+
+```powershell
+cd ..
+
+git clone https://github.com/yagu1/bst-id.git
+
+cd lora-mesh-daemon
+
+python -m pip install -e ..\bst-id
+```
+
+動作確認：
+
+```powershell
+python -c "from bst_id.encoder import BSTIDEncoder; print('BST-ID OK')"
+```
+
+### 5. config.pyの設定
+
+```powershell
+Copy-Item .\config_temolate.py .\config.py
+
+notepad .\config.py
+```
+
+Windowsの場合、シリアルポートをCOMポートに変更します。
+
+```python
+SERIAL_PORT = "COM3"
+BAUDRATE = 115200
+```
+
+基地局ごとにノードIDを変更します。
+
+基地局1：
+
+```python
+NODE_ID = "yaglabterm01"
+OWN_ID = "0001"
+```
+
+基地局2：
+
+```python
+NODE_ID = "yaglabterm02"
+OWN_ID = "0002"
+```
+
+GPSを使用しない基地局では、ダミーGPSを使用します。
+
+```python
+USE_DUMMY_GPS = True
+```
+
+Redis接続設定：
+
+```python
+REDIS_ENABLED = True
+REDIS_HOST = "127.0.0.1"
+REDIS_PORT = 6379
+REDIS_DB = 0
+```
+
+RedisはWSL側で起動します。
+
+Windowsから`127.0.0.1`で接続できない場合は、WSLとのネットワーク設定を確認してください。
+
+### 6. Redis接続確認
+
+WSL側でRedisを起動した状態で、WindowsのPowerShellから実行します。
+
+```powershell
+Test-NetConnection 127.0.0.1 -Port 6379
+```
+
+Pythonからの接続確認：
+
+```powershell
+python -c "import redis; print(redis.Redis(host='127.0.0.1', port=6379).ping())"
+```
+
+正常時は`True`が表示されます。
+
+### 7. プログラム起動
+
+PowerShellを2つ開きます。
+
+**PowerShell 1：LoRa送受信**
+
+```powershell
+cd $HOME\Documents\LoRa\lora-mesh-daemon
+
+.\.venv\Scripts\python.exe raw_daemon.py
+```
+
+**PowerShell 2：メッシュ通信**
+
+```powershell
+cd $HOME\Documents\LoRa\lora-mesh-daemon
+
+.\.venv\Scripts\python.exe mesh_daemon.py
+```
+
+### 注意事項
+
+- Windowsでは`sudo apt`を使用しません。
+- PythonライブラリはWindows側の仮想環境にインストールします。
+- シリアルポートは`COM3`など、実際に接続されているポートを指定します。
+- RedisはWSL側で起動します。
+- `raw_daemon.py`と`mesh_daemon.py`は別のターミナルで実行します。
