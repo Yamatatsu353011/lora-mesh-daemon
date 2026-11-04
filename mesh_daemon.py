@@ -15,6 +15,8 @@ from routing import Routing
 
 ORDER_CHANNEL = "event:business:order_created"
 OFFER_CHANNEL = "event:business:offer_created"
+RECEIPT_CHANNEL = "event:business:receipt_created"
+LOCAL_NODE_ID_KEY = "lora:gateway:local_node_id"
 COUNTER_KEY = f"lora:order:ask_seq:{config.OWN_ID}"
 TTL = 10
 
@@ -250,6 +252,73 @@ def process_offer(r, routing, msg):
     )
 
 
+
+
+def process_receipt(r, routing, msg):
+    """One complete receipt for one ASK; destination is the original responder."""
+    import re
+    if msg.get("type") != "ORDER_RECEIPT":
+        return
+    ask_id = str(msg.get("ask_pkt_id") or "")
+    if not re.fullmatch(r"[0-9A-Za-z]+-[0-9A-Za-z]+", ask_id):
+        raise ValueError("invalid ask_pkt_id")
+    if ask_id.split("-", 1)[0] != str(config.OWN_ID):
+        raise ValueError("receipt can only be sent by original requester")
+    raw = r.get(f"lora:orders:outgoing:{ask_id}")
+    reply_raw = r.get(f"lora:orders:reply_received:{ask_id}")
+    if not raw or not reply_raw:
+        raise ValueError("original ASK or received REPLY unavailable")
+    original, reply = json.loads(raw), json.loads(reply_raw)
+    if str(msg.get("order_id")) != str(original["order_id"]):
+        raise ValueError("order mismatch")
+    item_no = int(original["item_no"])
+    accepted = int(reply["accepted_qty"])
+    received = int(msg.get("received_qty"))
+    if not (0 <= received <= accepted <= int(original["requested_qty"])):
+        raise ValueError("receipt quantity out of range")
+    if received != accepted:
+        raise ValueError("initial version supports full receipt only")
+    responder = str(reply["responder_node"])
+    if str(msg.get("responder_node")) != responder:
+        raise ValueError("responder mismatch")
+    own_lat, own_lon = own_position(r)
+    zx = getattr(config, "BST_ZOOM_X", getattr(config, "BST_ZX", None))
+    zy = getattr(config, "BST_ZOOM_Y", getattr(config, "BST_ZY", None))
+    if zx is None or zy is None:
+        raise ValueError("missing BST zoom settings")
+    start_bst, start_bits = encode_position(own_lon, own_lat, zx, zy)
+    # Use responder position from REPLY's start BST, captured at RX time.
+    target_raw = r.get(f"lora:orders:reply_position:{ask_id}")
+    if not target_raw:
+        raise ValueError("responder position unavailable; receive a new REPLY")
+    target = json.loads(target_raw)
+    goal_bst, goal_bits = int(target["start_bst"]), int(target["start_bit_len"])
+    goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(goal_bst, goal_bits)
+    distance = max(0.01, haversine_distance_m(own_lat, own_lon, goal_lat, goal_lon))
+    data_id = f"C{item_no:02d}:{received}:{base36(int(config.OWN_ID))}"
+    # Existing binary REPLY type: the C prefix distinguishes receipt from offer (P).
+    packet = make_reply_packet(
+        pkt_id=ask_id,
+        goal_bst=goal_bst, goal_bit_len=goal_bits,
+        start_bst=start_bst, start_bit_len=start_bits,
+        data_id=data_id, ttl=TTL, distance=distance,
+    )
+    payload = packet.encode()
+    if len(payload) > min(50, int(getattr(config,"MAX_BINARY_PAYLOAD_LEN",50))):
+        raise ValueError("receipt exceeds radio limit")
+    guard = f"lora:orders:receipt_tx:{ask_id}"
+    if not r.set(guard, json.dumps(msg), nx=True):
+        print(f"[ORDER-RECEIPT-DUP] ask={ask_id}", flush=True)
+        return
+    try:
+        r.lpush(config.REDIS_RAW_TX, payload.hex())
+    except Exception:
+        r.delete(guard)
+        raise
+    routing.mark_sent(packet)
+    print(f"[ORDER-RECEIPT-QUEUED] ask={ask_id} received={received} to={responder} data_id={data_id} bytes={len(payload)}", flush=True)
+
+
 def decode_payload_hex(payload_hex: str):
     """
     Redis上のHEX文字列
@@ -299,6 +368,13 @@ def main():
         decode_responses=True,
     )
 
+    # config.OWN_ID is the single source of truth for the local BASE node ID.
+    # The Web reads it via this local Redis instance, never from a form field.
+    is_base = getattr(config, "NODE_ROLE", None) == "BASE"
+    if is_base:
+        r.set(LOCAL_NODE_ID_KEY, str(config.OWN_ID), ex=15)
+        print(f"[LOCAL-NODE-ID] {config.OWN_ID}", flush=True)
+
     if getattr(config, "USE_DUMMY_GPS", False):
         dummy_position = {
             "lat": config.DUMMY_LAT,
@@ -336,7 +412,7 @@ def main():
 
     channels = [config.REDIS_EVENT]
     if getattr(config, "NODE_ROLE", None) == "BASE":
-        channels.extend((ORDER_CHANNEL, OFFER_CHANNEL))
+        channels.extend((ORDER_CHANNEL, OFFER_CHANNEL, RECEIPT_CHANNEL))
     pubsub.subscribe(*channels)
     print(f"[MESH-CHANNELS] {channels}", flush=True)
 
@@ -350,6 +426,9 @@ def main():
     try:
 
         while True:
+            # Refresh ephemeral node identity; disappears if the daemon dies.
+            if is_base:
+                r.set(LOCAL_NODE_ID_KEY, str(config.OWN_ID), ex=15)
 
             message = pubsub.get_message(
                 timeout=1.0
@@ -400,6 +479,13 @@ def main():
                     process_offer(r, routing, event)
                 except Exception as exc:
                     print(f"[ORDER-REPLY-ERR] {type(exc).__name__}: {exc}", flush=True)
+                continue
+
+            if channel == RECEIPT_CHANNEL:
+                try:
+                    process_receipt(r, routing, event)
+                except Exception as exc:
+                    print(f"[ORDER-RECEIPT-ERR] {type(exc).__name__}: {exc}", flush=True)
                 continue
 
             if not isinstance(event, dict):

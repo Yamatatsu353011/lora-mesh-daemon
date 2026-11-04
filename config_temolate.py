@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 
 # ============================================================
@@ -19,13 +20,27 @@ OWN_ID = "0002"
 MY_DATA_IDS = {"a", "b", "c"}
 
 # ============================================================
+# Node role
+# ============================================================
+
+# BASE   : Base station
+# RELAY  : Fixed relay node with GPS
+# MOBILE : Mobile node with GPS
+
+NODE_ROLE = "BASE"
+
+
+# ============================================================
 # Position source
 # ============================================================
 
-# GPSがないノードはTrue
+# BASE   : True  (fixed coordinates)
+# RELAY  : False (real GPS)
+# MOBILE : False (real GPS)
+
 USE_DUMMY_GPS = True
 
-# 仮座標
+# Fixed coordinates for base station
 DUMMY_LAT = 37.521844
 DUMMY_LON = 139.939698
 
@@ -39,6 +54,7 @@ SERIAL_PORT = "/dev/lora0"
 
 BAUDRATE = 115200
 SERIAL_TIMEOUT_SEC = 0.5
+
 
 # ============================================================
 # GPS
@@ -209,11 +225,18 @@ MAX_TX_LINE_LEN = 80
 
 SLOTTED_ENABLED = True
 
-# One frame every 5 seconds
+# One frame = 1.0 second
 FRAME_SEC = 1.0
 
-# 0.5 sec slot x 10 slots
+# One slot = 0.2 seconds
+# Total slots = 5
 SLOT_SEC = 0.2
+
+# Fixed transmission slot
+# Valid range: 0 to 4
+# Each node should use a different slot
+
+TX_SLOT = 1
 
 # Avoid slot boundary
 TX_GUARD_SEC = 0.02
@@ -234,3 +257,4 @@ REDIS_CLEAN_PATTERNS = [
     "lora:state:radio",
     "lora:nodes:*",
 ]
+

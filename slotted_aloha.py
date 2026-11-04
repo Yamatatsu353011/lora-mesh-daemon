@@ -1,6 +1,7 @@
+
 # -*- coding: utf-8 -*-
 
-import random
+import config
 
 from time_utils import (
     now_sec,
@@ -15,6 +16,7 @@ class SlottedAloha:
         slot_sec: float,
         guard_sec: float,
         enabled: bool = True,
+        tx_slot: int = None,
     ):
 
         self.enabled = enabled
@@ -67,17 +69,41 @@ class SlottedAloha:
                 "invalid TX_GUARD_SEC"
             )
 
-        # 各ノードで独立した乱数
-        self.random = (
-            random.SystemRandom()
-        )
+        # ========================================================
+        # Fixed transmission slot
+        # ========================================================
+
+        # 指定がなければconfig.pyのTX_SLOTを使用
+        if tx_slot is None:
+            tx_slot = config.TX_SLOT
+
+        # スロット番号の型確認
+        if (
+            isinstance(tx_slot, bool)
+            or not isinstance(tx_slot, int)
+        ):
+            raise ValueError(
+                "TX_SLOT must be an integer"
+            )
+
+        # スロット番号の範囲確認
+        if not 0 <= tx_slot < self.num_slots:
+            raise ValueError(
+                f"TX_SLOT must be "
+                f"0 to {self.num_slots - 1}"
+            )
+
+        self.tx_slot = tx_slot
 
         self.current_frame = None
-        self.tx_slot = None
 
         # そのframeですでに送ったか
         self.sent_frame = None
 
+
+    # ============================================================
+    # Frame update
+    # ============================================================
 
     def _update_frame(
         self,
@@ -98,13 +124,8 @@ class SlottedAloha:
             frame_no
         )
 
-        # Slotted ALOHA:
-        # frameごとに送信slotをランダム選択
-        self.tx_slot = (
-            self.random.randrange(
-                self.num_slots
-            )
-        )
+        # 固定スロット方式：
+        # フレームが変わってもtx_slotは変更しない
 
         print(
             f"[ALOHA] "
@@ -114,6 +135,10 @@ class SlottedAloha:
             flush=True,
         )
 
+
+    # ============================================================
+    # Transmission permission
+    # ============================================================
 
     def can_transmit(
         self,
@@ -188,6 +213,10 @@ class SlottedAloha:
         return True
 
 
+    # ============================================================
+    # Mark transmitted
+    # ============================================================
+
     def mark_transmitted(
         self,
     ) -> None:
@@ -196,6 +225,10 @@ class SlottedAloha:
             self.current_frame
         )
 
+
+    # ============================================================
+    # Status
+    # ============================================================
 
     def status(
         self,

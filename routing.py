@@ -212,6 +212,21 @@ class Routing:
 
 
     # ============================================================
+    # REPLYの用途ごとに重複排除キーを分ける
+    # ============================================================
+
+    @staticmethod
+    def _dedup_message_type(packet: Packet) -> str:
+        # REPLY(P) and REPLY(C) share the original ASK pkt_id.
+        # P sent at responder must not suppress C received later there.
+        if packet.msg_type == "REPLY" and isinstance(packet.data_id, str):
+            if re.match(r"^P\d{2}:", packet.data_id):
+                return "REPLY:P"
+            if re.match(r"^C\d{2}:", packet.data_id):
+                return "REPLY:C"
+        return packet.msg_type
+
+    # ============================================================
     # Packet受信
     # ============================================================
 
@@ -225,7 +240,7 @@ class Routing:
         # --------------------------------------------------------
 
         if self.duplicate_suppressor.is_duplicate(
-            packet.msg_type,
+            self._dedup_message_type(packet),
             packet.pkt_id,
         ):
 
@@ -289,6 +304,9 @@ class Routing:
             if origin_id == str(config.OWN_ID):
                 print(f"[ORDER-OWN-SKIP] pkt={packet.pkt_id}", flush=True)
                 return
+
+            # 発注元のBST-IDから位置を復元し、既存の地図表示用Redisへ保存する。
+            self._save_sender_position(packet)
 
             # 物資番号は送信側ask_sender.pyの ITEM_CODES の順番と共通。
             item_codes = (
@@ -490,6 +508,10 @@ class Routing:
             self._handle_order_reply(packet)
             return
 
+        if isinstance(packet.data_id, str) and re.match(r"^C\d{2}:", packet.data_id):
+            self._handle_order_receipt(packet)
+            return
+
         if packet.data_id == "POS":
             role = getattr(config, "NODE_ROLE", None)
 
@@ -595,11 +617,169 @@ class Routing:
         if not self.redis.set(key, serialized, nx=True):
             print(f"[ORDER-REPLY-DUP] ask={packet.pkt_id}", flush=True)
             return
+
+        # REPLY(C)の送信先として、応答基地局の位置を保存する。
+        position = {
+            "start_bst": str(packet.start_bst),
+            "start_bit_len": packet.start_bit_len,
+            "responder_node": responder,
+        }
+        self.redis.set(
+            f"lora:orders:reply_position:{packet.pkt_id}",
+            json.dumps(position),
+        )
+
         self.redis.lpush("lora:orders:replies", serialized)
         self.redis.ltrim("lora:orders:replies", 0, 999)
         print(f"[ORDER-REPLY-RECEIVED] ask={packet.pkt_id} "
               f"item={record['item_code']} accepted={qty} "
               f"responder={responder}", flush=True)
+
+
+    # ============================================================
+    # LoRa business-order receipt: REPLY(Cxx:qty:origin36)
+    # ============================================================
+
+    def _handle_order_receipt(self, packet: Packet) -> None:
+        """
+        発注元からの受領通知を、提供側BASEで記録する。
+        """
+        match = re.fullmatch(
+            r"C(\d{2}):(\d+):([0-9A-Z]+)",
+            packet.data_id
+        )
+
+        if not match:
+            print(
+                f"[ORDER-RECEIPT-DROP] invalid data={packet.data_id!r}",
+                flush=True,
+            )
+            return
+
+        item_no = int(match.group(1))
+        received_qty = int(match.group(2))
+
+        if not (1 <= item_no <= 17 and 0 < received_qty <= 9999):
+            print(
+                f"[ORDER-RECEIPT-DROP] invalid item/qty ask={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        origin = packet.pkt_id.split("-", 1)[0]
+
+        if "-" not in packet.pkt_id or not origin.isdecimal():
+            print(
+                f"[ORDER-RECEIPT-DROP] invalid pkt_id={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        try:
+            encoded_origin = int(match.group(3), 36)
+        except ValueError:
+            print(
+                f"[ORDER-RECEIPT-DROP] invalid sender ask={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        if encoded_origin != int(origin):
+            print(
+                f"[ORDER-RECEIPT-DROP] sender mismatch ask={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        role = getattr(config, "NODE_ROLE", None)
+
+        # 中継ノードは既存の位置指向性処理へ渡す。
+        if role == "RELAY":
+            self._forward(packet)
+            return
+
+        # 発注元自身や移動ノードでは受領記録を作らない。
+        if role != "BASE" or origin == str(config.OWN_ID):
+            print(
+                f"[ORDER-RECEIPT-SKIP] role={role} origin={origin}",
+                flush=True,
+            )
+            return
+
+        # 過去に自局が受信したASKとの対応を確認する。
+        raw = self.redis.get(
+            f"lora:orders:received:{origin}:{packet.pkt_id}"
+        )
+
+        if not raw:
+            print(
+                f"[ORDER-RECEIPT-DROP] unknown ASK={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        try:
+            original = json.loads(raw)
+            requested_qty = int(original["requested_qty"])
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            print(
+                f"[ORDER-RECEIPT-DROP] malformed ASK mapping={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        if (
+            str(original.get("received_by")) != str(config.OWN_ID)
+            or int(original.get("item_no", -1)) != item_no
+            or received_qty > requested_qty
+        ):
+            print(
+                f"[ORDER-RECEIPT-DROP] mismatched ASK={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        # SQLite同期側が使用する形式でRedisへ保存する。
+        record = {
+            "source": "LORA_ORDER_RECEIPT",
+            "ask_pkt_id": packet.pkt_id,
+            "order_id": f"lora-{packet.pkt_id}",
+            "origin_node": origin,
+            "received_by": str(config.OWN_ID),
+            "item_code": original["item_code"],
+            "item_no": item_no,
+            "requested_qty": requested_qty,
+            "received_qty": received_qty,
+            "received_at": time.time(),
+        }
+
+        serialized = json.dumps(record, ensure_ascii=False)
+
+        key = f"lora:orders:receipt_received:{packet.pkt_id}"
+
+        if not self.redis.set(key, serialized, nx=True):
+            print(
+                f"[ORDER-RECEIPT-DUP] ask={packet.pkt_id}",
+                flush=True,
+            )
+            return
+
+        self.redis.lpush(
+            "lora:orders:receipts",
+            serialized,
+        )
+        self.redis.ltrim(
+            "lora:orders:receipts",
+            0,
+            999,
+        )
+
+        print(
+            f"[ORDER-RECEIPT-RECEIVED] ask={packet.pkt_id} "
+            f"item={original['item_code']} qty={received_qty} "
+            f"from={origin} base={config.OWN_ID}",
+            flush=True,
+        )
 
 
     # ============================================================
@@ -654,7 +834,6 @@ class Routing:
 
         local_distance:
             自ノードからgoalまでの距離[m]
-
         """
 
         if not packet.can_forward():
@@ -763,7 +942,7 @@ class Routing:
         """
 
         self.duplicate_suppressor.is_duplicate(
-            packet.msg_type,
+            self._dedup_message_type(packet),
             packet.pkt_id,
         )
 
@@ -803,7 +982,6 @@ class Routing:
 
             return
 
-
         # pkt_id = "0001-20"
         #       ↓
         # node_id = "0001"
@@ -821,7 +999,6 @@ class Routing:
             "bst_bit_len": packet.start_bit_len,
         }
 
-        
         key = f"lora:nodes:{node_id}"
 
         self.redis.set(
@@ -838,7 +1015,6 @@ class Routing:
         )
 
 
-
     # ============================================================
     # 移動ノードのREPLY位置通知を基地局で保存
     # ============================================================
@@ -851,11 +1027,14 @@ class Routing:
         監視用REPLYのpkt_idは「移動ノードOWN_ID-連番」とする。
         BST-IDを復元した座標であり、生のGPS座標ではない。
         """
-        import time
 
         node_id = packet.pkt_id.split("-", 1)[0]
+
         if not node_id or "-" not in packet.pkt_id:
-            print(f"[MONITOR-DROP] invalid pkt_id={packet.pkt_id}", flush=True)
+            print(
+                f"[MONITOR-DROP] invalid pkt_id={packet.pkt_id}",
+                flush=True,
+            )
             return
 
         try:
@@ -869,11 +1048,19 @@ class Routing:
             lon = float(lon)
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 raise ValueError("decoded coordinates out of range")
+
         except (ValueError, TypeError, OverflowError) as e:
-            print(f"[MONITOR-DROP] invalid position id={packet.pkt_id}: {e}", flush=True)
+            print(
+                f"[MONITOR-DROP] invalid position id={packet.pkt_id}: {e}",
+                flush=True,
+            )
             return
+
         except Exception as e:
-            print(f"[MONITOR-DROP] BST decode failed id={packet.pkt_id}: {e}", flush=True)
+            print(
+                f"[MONITOR-DROP] BST decode failed id={packet.pkt_id}: {e}",
+                flush=True,
+            )
             return
 
         node_state = {
@@ -886,16 +1073,26 @@ class Routing:
             "packet_id": packet.pkt_id,
             "source": "REPLY_POS",
         }
-        prefix = getattr(config, "REDIS_NODE_PREFIX", "lora:nodes:")
+
+        prefix = getattr(
+            config,
+            "REDIS_NODE_PREFIX",
+            "lora:nodes:",
+        )
+
         key = f"{prefix}{node_id}"
-        # Count only unique monitoring packets. handle_packet() has already
-        # rejected duplicates using (msg_type, pkt_id).
+
+        # Count only unique monitoring packets.
         count_key = f"lora:monitor:rx_count:{node_id}"
         rx_count = self.redis.incr(count_key)
+
         node_state["rx_count"] = rx_count
 
         # Preserve the existing key used by the map/web integration.
-        self.redis.set(key, json.dumps(node_state))
+        self.redis.set(
+            key,
+            json.dumps(node_state),
+        )
 
         print(
             f"[MONITOR-REPLY] node={node_id} "
@@ -903,4 +1100,3 @@ class Routing:
             f"rx_count={rx_count}",
             flush=True,
         )
-
