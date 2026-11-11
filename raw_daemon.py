@@ -7,7 +7,7 @@ import time
 import redis
 
 import config
-from easel_radio import EaselRadio
+from radio_factory import create_radio
 from slotted_aloha import SlottedAloha
 
 
@@ -36,6 +36,7 @@ def main():
         decode_responses=True,
     )
 
+
     # ============================================================
     # Slotted ALOHA
     # ============================================================
@@ -45,22 +46,19 @@ def main():
         slot_sec=config.SLOT_SEC,
         guard_sec=config.TX_GUARD_SEC,
         enabled=config.SLOTTED_ENABLED,
-        tx_slot=config.TX_SLOT,
     )
+
 
     # ============================================================
     # LoRa
     # ============================================================
 
-    radio = EaselRadio(
+    radio = create_radio(
         debug=True
     )
 
     radio.open()
     radio.configure_from_config()
-
-    # 通常運用時は短いタイムアウトを使用
-    radio.ser.timeout = 0.01
 
     print(
         "[RAW-DAEMON] started",
@@ -72,10 +70,10 @@ def main():
         f"enabled={config.SLOTTED_ENABLED} "
         f"frame={config.FRAME_SEC}s "
         f"slot={config.SLOT_SEC}s "
-        f"tx_slot={aloha.tx_slot} "
         f"guard={config.TX_GUARD_SEC}s",
         flush=True,
     )
+
 
     try:
 
@@ -97,6 +95,7 @@ def main():
                 timeout_sec=0.02
             )
 
+
             if payload:
 
                 payload_hex = payload.hex()
@@ -106,6 +105,30 @@ def main():
                     "payload_hex": payload_hex,
                     "received_at_ms": now_ms(),
                 }
+                # Optional per-hop signal metadata from FLINT radio.
+                # This is the *immediate* RF transmitter, not necessarily
+                # the original source node in the routed Mesh packet.
+                hop = getattr(radio, "last_rx_hop_id", None)
+                seq = getattr(radio, "last_rx_hop_seq", None)
+                rssi = getattr(radio, "last_rx_rssi_dbm", None)
+                if hop is not None:
+                    obj["hop_sender_id"] = hop
+                    obj["hop_seq"] = seq
+                if rssi is not None:
+                    obj["rssi_dbm"] = rssi
+                if hop is not None:
+                    r.set(
+                        f"lora:link:{config.NODE_ID}:{hop}",
+                        json_dumps({
+                            "receiver_node_id": config.NODE_ID,
+                            "hop_sender_id": hop,
+                            "hop_seq": seq,
+                            "rssi_dbm": rssi,
+                            "updated_at_ms": obj["received_at_ms"],
+                        }),
+                        ex=60,
+                    )
+
 
                 # -------------------------
                 # RX履歴
@@ -122,6 +145,7 @@ def main():
                     99
                 )
 
+
                 # -------------------------
                 # mesh_daemonへ通知
                 # -------------------------
@@ -134,12 +158,14 @@ def main():
                     })
                 )
 
+
                 print(
                     f"[RAW-RX] "
                     f"len={len(payload)} "
                     f"hex={payload_hex}",
                     flush=True
                 )
+
 
             # ====================================================
             # TX
@@ -163,6 +189,7 @@ def main():
                     config.REDIS_RAW_TX
                 )
 
+
                 if tx_hex:
 
                     try:
@@ -170,6 +197,7 @@ def main():
                         tx_payload = bytes.fromhex(
                             tx_hex
                         )
+
 
                     except ValueError:
 
@@ -181,15 +209,20 @@ def main():
 
                         tx_payload = None
 
+
                     if tx_payload:
 
                         # -------------------------
                         # 最大50 byte
                         # -------------------------
 
+                        max_radio_payload = min(
+                            int(getattr(config, "MAX_BINARY_PAYLOAD_LEN", 50)),
+                            int(getattr(radio, "MAX_BINARY_PAYLOAD", 50)),
+                        )
                         if (
                             len(tx_payload)
-                            > config.MAX_BINARY_PAYLOAD_LEN
+                            > max_radio_payload
                         ):
 
                             print(
@@ -197,9 +230,10 @@ def main():
                                 f"too long "
                                 f"len={len(tx_payload)} "
                                 f"max="
-                                f"{config.MAX_BINARY_PAYLOAD_LEN}",
+                                f"{max_radio_payload}",
                                 flush=True
                             )
+
 
                             r.publish(
                                 config.REDIS_EVENT,
@@ -214,12 +248,13 @@ def main():
                                         len(tx_payload),
 
                                     "max_len":
-                                        config.MAX_BINARY_PAYLOAD_LEN,
+                                        max_radio_payload,
 
                                     "at_ms":
                                         now_ms(),
                                 })
                             )
+
 
                         else:
 
@@ -230,6 +265,7 @@ def main():
                             aloha_state = (
                                 aloha.status()
                             )
+
 
                             print(
                                 f"[ALOHA-TX] "
@@ -244,6 +280,7 @@ def main():
                                 flush=True,
                             )
 
+
                             # -------------------------
                             # Binary LoRa送信
                             # -------------------------
@@ -254,11 +291,13 @@ def main():
                                 )
                             )
 
+
                             # -------------------------
                             # このframeでは送信済み
                             # -------------------------
 
                             aloha.mark_transmitted()
+
 
                             # -------------------------
                             # TXイベント
@@ -296,6 +335,7 @@ def main():
                                 })
                             )
 
+
                             print(
                                 f"[RAW-TX] "
                                 f"len={len(tx_payload)} "
@@ -303,6 +343,7 @@ def main():
                                 f"hex={tx_hex}",
                                 flush=True
                             )
+
 
             # ====================================================
             # State
@@ -314,19 +355,26 @@ def main():
 
             state = {
                 "node_id": config.NODE_ID,
+                "radio_type": getattr(config, "RADIO_TYPE", "easel"),
 
                 "port": config.SERIAL_PORT,
                 "baudrate": config.BAUDRATE,
 
-                "bw": config.BW,
-                "sf": config.SF,
-                "ch": config.CH,
+                "bw": (getattr(config, "FLINT_BW_KHZ", 500)
+                       if getattr(config, "RADIO_TYPE", "easel") == "flint" else config.BW),
+                "sf": (getattr(config, "FLINT_SF", 6)
+                       if getattr(config, "RADIO_TYPE", "easel") == "flint" else config.SF),
+                "ch": (getattr(config, "FLINT_CHANNEL", 0)
+                       if getattr(config, "RADIO_TYPE", "easel") == "flint" else config.CH),
 
-                "panid": config.PAN_ID,
+                "panid": (None if getattr(config, "RADIO_TYPE", "easel") == "flint"
+                          else config.PAN_ID),
                 "ownid": config.OWN_ID,
-                "dstid": config.DST_ID,
+                "dstid": ("FFFF" if getattr(config, "RADIO_TYPE", "easel") == "flint"
+                          else config.DST_ID),
 
-                "format": config.FORMAT,
+                "format": ("framed-binary" if getattr(config, "RADIO_TYPE", "easel") == "flint"
+                           else config.FORMAT),
 
                 # Slotted ALOHA
                 "aloha_enabled":
@@ -351,14 +399,17 @@ def main():
                     now_ms(),
             }
 
+
             r.set(
                 config.REDIS_STATE,
                 json_dumps(state)
             )
 
+
             # 0.2秒slotを取り逃がさないよう
             # 5ms周期でメインループ
             time.sleep(0.005)
+
 
     except KeyboardInterrupt:
 
@@ -366,6 +417,7 @@ def main():
             "\n[RAW-DAEMON] stopped",
             flush=True
         )
+
 
     finally:
 
