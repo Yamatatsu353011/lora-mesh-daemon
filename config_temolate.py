@@ -2,26 +2,37 @@
 # -*- coding: utf-8 -*-
 
 # ============================================================
-# Node identity
+# ★ Node-specific settings
+# ★ Change this section for each node
 # ============================================================
 
-# Change for each node
+# ------------------------------------------------------------
+# Node identity
+# ------------------------------------------------------------
+
 # Example:
-#   yaglabterm01 -> NODE_ID = "yaglabterm01", OWN_ID = "0001"
-#   yaglabterm02 -> NODE_ID = "yaglabterm02", OWN_ID = "0002"
-#   yaglabterm03 -> NODE_ID = "yaglabterm03", OWN_ID = "0003"
+#   yaglabterm01 -> OWN_ID = "0001"
 
 NODE_ID = "yaglabterm02"
-
-# EASEL own node ID
 OWN_ID = "0002"
 
 # Data held by this node
 MY_DATA_IDS = {"a", "b", "c"}
 
-# ============================================================
+
+# ------------------------------------------------------------
+# Radio selection
+# ------------------------------------------------------------
+
+# "easel" : FaBo / ES920LR
+# "flint" : FLINT
+
+RADIO_TYPE = "flint"
+
+
+# ------------------------------------------------------------
 # Node role
-# ============================================================
+# ------------------------------------------------------------
 
 # BASE   : Base station
 # RELAY  : Fixed relay node with GPS
@@ -30,27 +41,45 @@ MY_DATA_IDS = {"a", "b", "c"}
 NODE_ROLE = "BASE"
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Position source
-# ============================================================
+# ------------------------------------------------------------
 
 # BASE   : True  (fixed coordinates)
 # RELAY  : False (real GPS)
 # MOBILE : False (real GPS)
 
 USE_DUMMY_GPS = True
-
-# Fixed coordinates for base station
 DUMMY_LAT = 37.521844
 DUMMY_LON = 139.939698
 
 
+# ------------------------------------------------------------
+# Serial ports
+# ------------------------------------------------------------
+
+SERIAL_PORT = "/dev/lora0"
+GPS_SERIAL_PORT = "/dev/lora1"
+
+# ------------------------------------------------------------
+# Slotted ALOHA
+# ------------------------------------------------------------
+
+# Each node should use a different slot.
+# Valid range: 0 to 4
+
+TX_SLOT = 1
+
+
 # ============================================================
-# Serial port
+# Common settings
+# Normally no changes are required below this line.
 # ============================================================
 
-# Raspberry Pi / Ubuntu
-SERIAL_PORT = "/dev/lora0"
+
+# ============================================================
+# Serial communication
+# ============================================================
 
 BAUDRATE = 115200
 SERIAL_TIMEOUT_SEC = 0.5
@@ -60,7 +89,6 @@ SERIAL_TIMEOUT_SEC = 0.5
 # GPS
 # ============================================================
 
-GPS_SERIAL_PORT = "/dev/lora1"
 GPS_BAUDRATE = 9600
 
 BST_ZOOM_X = 32
@@ -69,6 +97,7 @@ BST_ZOOM_Y = 32
 
 # ============================================================
 # EASEL ES920LR radio settings
+# Used when RADIO_TYPE = "easel"
 # ============================================================
 #
 # bw:
@@ -131,6 +160,24 @@ EASEL_CONFIG_COMMANDS = [
     ("rssi", RSSI),
     ("power", POWER),
 ]
+
+
+# ============================================================
+# FLINT radio settings
+# Used when RADIO_TYPE = "flint"
+# ============================================================
+
+# Automatically uses this node's OWN_ID.
+FLINT_HOP_ID = OWN_ID
+
+# Must match the actual FLINT device settings.
+FLINT_CHANNEL = 0
+FLINT_RSSI_BYTE = True
+
+# Documentation / state reporting only.
+# These values do not configure the hardware.
+FLINT_SF = 6
+FLINT_BW_KHZ = 500
 
 
 # ============================================================
@@ -231,12 +278,6 @@ FRAME_SEC = 1.0
 # One slot = 0.2 seconds
 # Total slots = 5
 SLOT_SEC = 0.2
-
-# Fixed transmission slot
-# Valid range: 0 to 4
-# Each node should use a different slot
-
-TX_SLOT = 1
 
 # Avoid slot boundary
 TX_GUARD_SEC = 0.02
