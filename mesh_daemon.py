@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 
 import json
@@ -164,9 +165,8 @@ def process_order(r, routing, msg):
 
 
 
-# REPLY uses the existing binary Packet type (type=1), with data_id
-# Pxx:qty:node36 e.g. P01:2:2 = node 0002 offers 2 units of water.
-# One reply is supported per ASK packet ID in this initial implementation.
+# REPLY(P): Pxx:qty:responder36:reply_seq36. ASK pkt_id stays unchanged.
+# Each reply has a unique responder-local sequence scoped to this ASK.
 def process_offer(r, routing, msg):
     if msg.get("type") != "ORDER_REPLY":
         return
@@ -222,7 +222,18 @@ def process_offer(r, routing, msg):
     # One-character station ID for 0001..0009, allowing enough packet space.
     # Larger station IDs are base36, checked against the 50-byte radio limit.
     responder36 = base36(int(str(config.OWN_ID)))
-    data_id = f"P{ITEM_TO_NUM[item_code]:02d}:{qty}:{responder36}"
+    offer_id = str(msg.get("offer_id") or "")
+    if not offer_id:
+        raise ValueError("offer_id missing")
+    # An event may be delivered again; only one radio reply per Web offer.
+    offer_guard = f"lora:orders:reply_offer_tx:{offer_id}"
+    if r.exists(offer_guard):
+        print(f"[ORDER-REPLY-DUP] offer={offer_id} already sent", flush=True)
+        return
+    seq = r.incr(f"lora:orders:reply_seq:{ask_pkt_id}:{responder36}")
+    seq36 = base36(seq)
+    reply_id = f"{ask_pkt_id}:{responder36}:{seq36}"
+    data_id = f"P{ITEM_TO_NUM[item_code]:02d}:{qty}:{responder36}:{seq36}"
     packet = make_reply_packet(
         pkt_id=ask_pkt_id,
         goal_bst=goal_bst, goal_bit_len=goal_bits,
@@ -232,21 +243,21 @@ def process_offer(r, routing, msg):
     payload = packet.encode()
     if len(payload) > min(50, int(getattr(config, "MAX_BINARY_PAYLOAD_LEN", 50))):
         raise ValueError(f"REPLY exceeds radio payload limit: {len(payload)}")
-
-    # Enforce one reply per ASK at BASE B. Note: with Pub/Sub, a crash before
-    # enqueue may lose the event; durable delivery is a later enhancement.
-    guard = f"lora:orders:reply_tx:{ask_pkt_id}"
-    if not r.set(guard, str(msg.get("offer_id", "")), nx=True):
-        print(f"[ORDER-REPLY-DUP] ask={ask_pkt_id} already sent", flush=True)
-        return
-    try:
-        r.lpush(config.REDIS_RAW_TX, payload.hex())
-    except Exception:
-        r.delete(guard)
-        raise
+    sent_record = {
+        "reply_id": reply_id, "ask_pkt_id": ask_pkt_id,
+        "responder_node": str(config.OWN_ID), "reply_seq": seq36,
+        "offer_id": offer_id, "item_no": ITEM_TO_NUM[item_code],
+        "accepted_qty": qty,
+    }
+    # Atomically save the reply's identity and queue the radio payload.
+    with r.pipeline(transaction=True) as tx:
+        tx.set(offer_guard, reply_id)
+        tx.set(f"lora:orders:reply_sent:{reply_id}", json.dumps(sent_record))
+        tx.lpush(config.REDIS_RAW_TX, payload.hex())
+        tx.execute()
     routing.mark_sent(packet)
     print(
-        f"[ORDER-REPLY-QUEUED] ask={ask_pkt_id} item={item_code} "
+        f"[ORDER-REPLY-QUEUED] ask={ask_pkt_id} reply={reply_id} item={item_code} "
         f"accepted={qty} bytes={len(payload)} responder={config.OWN_ID}",
         flush=True,
     )
@@ -255,7 +266,7 @@ def process_offer(r, routing, msg):
 
 
 def process_receipt(r, routing, msg):
-    """One complete receipt for one ASK; destination is the original responder."""
+    """Emit one REPLY(C) per distinct responder offer; ASK ID is preserved."""
     import re
     if msg.get("type") != "ORDER_RECEIPT":
         return
@@ -264,22 +275,26 @@ def process_receipt(r, routing, msg):
         raise ValueError("invalid ask_pkt_id")
     if ask_id.split("-", 1)[0] != str(config.OWN_ID):
         raise ValueError("receipt can only be sent by original requester")
-    raw = r.get(f"lora:orders:outgoing:{ask_id}")
-    reply_raw = r.get(f"lora:orders:reply_received:{ask_id}")
-    if not raw or not reply_raw:
-        raise ValueError("original ASK or received REPLY unavailable")
-    original, reply = json.loads(raw), json.loads(reply_raw)
+    responder = str(msg.get("responder_node") or "")
+    seq36 = str(msg.get("reply_seq") or "").upper()
+    if not re.fullmatch(r"[0-9A-Z]+", seq36) or not responder.isdecimal():
+        raise ValueError("invalid reply identity")
+    responder36 = base36(int(responder))
+    reply_id = f"{ask_id}:{responder36}:{seq36}"
+    original_raw = r.get(f"lora:orders:outgoing:{ask_id}")
+    reply_raw = r.get(f"lora:orders:reply_received:{reply_id}")
+    target_raw = r.get(f"lora:orders:reply_position:{reply_id}")
+    if not original_raw or not reply_raw or not target_raw:
+        raise ValueError("original ASK or selected REPLY unavailable")
+    original, reply, target = json.loads(original_raw), json.loads(reply_raw), json.loads(target_raw)
     if str(msg.get("order_id")) != str(original["order_id"]):
         raise ValueError("order mismatch")
     item_no = int(original["item_no"])
     accepted = int(reply["accepted_qty"])
     received = int(msg.get("received_qty"))
-    if not (0 <= received <= accepted <= int(original["requested_qty"])):
+    if not (0 < received == accepted <= int(original["requested_qty"])):
         raise ValueError("receipt quantity out of range")
-    if received != accepted:
-        raise ValueError("initial version supports full receipt only")
-    responder = str(reply["responder_node"])
-    if str(msg.get("responder_node")) != responder:
+    if str(reply["responder_node"]) != responder or str(target["responder_node"]) != responder:
         raise ValueError("responder mismatch")
     own_lat, own_lon = own_position(r)
     zx = getattr(config, "BST_ZOOM_X", getattr(config, "BST_ZX", None))
@@ -287,16 +302,11 @@ def process_receipt(r, routing, msg):
     if zx is None or zy is None:
         raise ValueError("missing BST zoom settings")
     start_bst, start_bits = encode_position(own_lon, own_lat, zx, zy)
-    # Use responder position from REPLY's start BST, captured at RX time.
-    target_raw = r.get(f"lora:orders:reply_position:{ask_id}")
-    if not target_raw:
-        raise ValueError("responder position unavailable; receive a new REPLY")
-    target = json.loads(target_raw)
     goal_bst, goal_bits = int(target["start_bst"]), int(target["start_bit_len"])
     goal_lon, goal_lat, _, _ = BSTIDDecoder.decode(goal_bst, goal_bits)
     distance = max(0.01, haversine_distance_m(own_lat, own_lon, goal_lat, goal_lon))
-    data_id = f"C{item_no:02d}:{received}:{base36(int(config.OWN_ID))}"
-    # Existing binary REPLY type: the C prefix distinguishes receipt from offer (P).
+    # Cxx:received:responder36:reply_seq36, tied to the exact P reply.
+    data_id = f"C{item_no:02d}:{received}:{responder36}:{seq36}"
     packet = make_reply_packet(
         pkt_id=ask_id,
         goal_bst=goal_bst, goal_bit_len=goal_bits,
@@ -304,11 +314,11 @@ def process_receipt(r, routing, msg):
         data_id=data_id, ttl=TTL, distance=distance,
     )
     payload = packet.encode()
-    if len(payload) > min(50, int(getattr(config,"MAX_BINARY_PAYLOAD_LEN",50))):
+    if len(payload) > min(50, int(getattr(config, "MAX_BINARY_PAYLOAD_LEN", 50))):
         raise ValueError("receipt exceeds radio limit")
-    guard = f"lora:orders:receipt_tx:{ask_id}"
+    guard = f"lora:orders:receipt_tx:{reply_id}"
     if not r.set(guard, json.dumps(msg), nx=True):
-        print(f"[ORDER-RECEIPT-DUP] ask={ask_id}", flush=True)
+        print(f"[ORDER-RECEIPT-DUP] reply={reply_id}", flush=True)
         return
     try:
         r.lpush(config.REDIS_RAW_TX, payload.hex())
@@ -316,7 +326,8 @@ def process_receipt(r, routing, msg):
         r.delete(guard)
         raise
     routing.mark_sent(packet)
-    print(f"[ORDER-RECEIPT-QUEUED] ask={ask_id} received={received} to={responder} data_id={data_id} bytes={len(payload)}", flush=True)
+    print(f"[ORDER-RECEIPT-QUEUED] reply={reply_id} received={received} to={responder} bytes={len(payload)}", flush=True)
+
 
 
 def decode_payload_hex(payload_hex: str):
@@ -582,4 +593,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
