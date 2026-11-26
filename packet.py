@@ -13,6 +13,9 @@ MAX_PACKET_BYTES = 50
 # Application-level msg_type remains "REPLY" and data_id remains "POS".
 POS_REPLY_TYPE_BYTE = 2
 
+# Coastal patrol detection notification.
+DETECTION_TYPE_BYTE = 3
+
 
 @dataclass
 class Packet:
@@ -37,29 +40,45 @@ class Packet:
 
     def encode(self) -> bytes:
 
-        # Compact binary format only for REPLY/POS.
+        # Compact binary format for REPLY/POS and DETECTION.
         # Layout: type(1), pkt_id_len(1), pkt_id(variable),
         #         start_bit_len(1), start_bst(10), ttl(1).
         # goal_bst, goal_bit_len, data_id and distance are omitted on wire.
-        if self.msg_type == "REPLY" and self.data_id == "POS":
+        if (self.msg_type == "REPLY" and self.data_id == "POS") or (
+            self.msg_type == "DETECTION" and self.data_id == "DET"
+        ):
             pkt_id_bytes = self.pkt_id.encode("utf-8")
+
             if not 1 <= len(pkt_id_bytes) <= 255:
                 raise ValueError("invalid pkt_id length")
+
             if not 0 <= self.start_bit_len <= BST_BYTES * 8:
                 raise ValueError("invalid start_bit_len")
+
             if not 0 <= self.start_bst < (1 << (BST_BYTES * 8)):
                 raise ValueError("invalid start_bst")
+
             if not 0 <= self.ttl <= 255:
                 raise ValueError("ttl must be 0-255")
+
             packet = (
-                bytes([POS_REPLY_TYPE_BYTE, len(pkt_id_bytes)])
+                bytes([
+                    POS_REPLY_TYPE_BYTE
+                    if self.msg_type == "REPLY"
+                    else DETECTION_TYPE_BYTE,
+                    len(pkt_id_bytes),
+                ])
                 + pkt_id_bytes
                 + bytes([self.start_bit_len])
                 + self.start_bst.to_bytes(BST_BYTES, "big")
                 + bytes([self.ttl])
             )
+
             if len(packet) > MAX_PACKET_BYTES:
-                raise ValueError(f"Packet too large: {len(packet)} bytes")
+                raise ValueError(
+                    f"Packet too large: {len(packet)} bytes"
+                )
+
             return packet
 
         if self.msg_type == "ASK":
@@ -186,27 +205,62 @@ class Packet:
             if not data or len(data) > MAX_PACKET_BYTES:
                 return None
 
-            # Compact monitoring REPLY (binary type byte 2).
-            if data[0] == POS_REPLY_TYPE_BYTE:
+            # Compact REPLY/POS (2) and DETECTION (3).
+            if data[0] in (
+                POS_REPLY_TYPE_BYTE,
+                DETECTION_TYPE_BYTE,
+            ):
                 if len(data) < 15:
                     return None
+
                 pkt_id_len = data[1]
+
                 if pkt_id_len < 1 or len(data) != 14 + pkt_id_len:
                     return None
-                pkt_id = data[2:2 + pkt_id_len].decode("utf-8")
+
+                pkt_id = data[
+                    2:2 + pkt_id_len
+                ].decode("utf-8")
+
                 offset = 2 + pkt_id_len
+
                 start_bit_len = data[offset]
+
                 if start_bit_len > BST_BYTES * 8:
                     return None
+
                 start_bst = int.from_bytes(
-                    data[offset + 1:offset + 1 + BST_BYTES], "big"
+                    data[
+                        offset + 1:
+                        offset + 1 + BST_BYTES
+                    ],
+                    "big"
                 )
+
                 ttl = data[-1]
+
+                is_detection = (
+                    data[0] == DETECTION_TYPE_BYTE
+                )
+
                 return cls(
-                    msg_type="REPLY", pkt_id=pkt_id,
-                    goal_bst=0, goal_bit_len=0,
-                    start_bst=start_bst, start_bit_len=start_bit_len,
-                    data_id="POS", ttl=ttl, distance=0.0,
+                    msg_type=(
+                        "DETECTION"
+                        if is_detection
+                        else "REPLY"
+                    ),
+                    pkt_id=pkt_id,
+                    goal_bst=0,
+                    goal_bit_len=0,
+                    start_bst=start_bst,
+                    start_bit_len=start_bit_len,
+                    data_id=(
+                        "DET"
+                        if is_detection
+                        else "POS"
+                    ),
+                    ttl=ttl,
+                    distance=0.0,
                 )
 
             offset = 0
